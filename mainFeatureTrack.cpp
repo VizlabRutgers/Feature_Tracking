@@ -96,7 +96,7 @@
 #include <ctime>
 #include <netcdf.h>
 
-
+#include <vtkNew.h>
 #include <vtkSmartPointer.h>
 #include <vtkPointSource.h>
 #include <vtkIdTypeArray.h>
@@ -118,6 +118,10 @@
 #include <vtkMarchingCubes.h>
 #include <vtkDiscreteMarchingCubes.h>
 #include <vtkCellTypes.h>
+#include <vtkStaticPointLocator.h>
+#include <vtkOBBTree.h>
+#include <vtkLine.h>
+#include <vtkPolygon.h>
 
 
 #include <vtkFillHolesFilter.h>
@@ -1029,11 +1033,12 @@ vtkDataSet * ReadNcDataFile_Melike(float ** Data_out,string FileName,float ** Xc
     double *v_vals = new double[x_rho*y_rho*z_rho];
     double *ETA_vals = new double[x_rho*y_rho*z_rho];
     double *temp_vals = new double [x_rho*y_rho*z_rho];
+    double *salt_vals = new double [x_rho*y_rho*z_rho];
     //double * ocean_time_Vals = new double [1];
 
     int ncid;// pres_varid, temp_varid;
     //int lat_varid, lon_varid, Tcline_varid, h_varid, Cs_r_varid, Cs_w_varid, u_Vals_varid, v_Vals_varid;
-    int z_varid, y_varid, x_varid, u_varid, v_varid, temp_varid, ETA_varid;
+    int z_varid, y_varid, x_varid, u_varid, v_varid, temp_varid, salt_varid, ETA_varid;
     //int ocean_time__varid, pm_varid, pn_varid ;
     size_t start[NDIMS], count[NDIMS];
     double hc;
@@ -1063,8 +1068,10 @@ vtkDataSet * ReadNcDataFile_Melike(float ** Data_out,string FileName,float ** Xc
         cout<<"couldnt open 2 the file :[ "<<GRID_FILE_NAME.c_str()<<" ---- !!!"<<endl;
     if ((retval = nc_inq_varid(ncid, "X", &x_varid)))
         cout<<"couldnt open 2.1 the file :[ "<<GRID_FILE_NAME.c_str()<<" ---- !!!"<<endl;
-//    if ((retval = nc_inq_varid(ncid, "Temp", &temp_varid)))
-//        cout<<"couldnt open 2.2 the file :[ "<<GRID_FILE_NAME.c_str()<<" ---- !!!"<<endl;
+    if ((retval = nc_inq_varid(ncid, "TEMP", &temp_varid)))
+        cout<<"couldnt open 2.2 the file :[ "<<GRID_FILE_NAME.c_str()<<" ---- !!!"<<endl;
+    if ((retval = nc_inq_varid(ncid, "SALT", &salt_varid)))
+        cout<<"couldnt open 2.2 the file :[ "<<GRID_FILE_NAME.c_str()<<" ---- !!!"<<endl;
     if ((retval = nc_inq_varid(ncid, "U", &u_varid)))
         cout<<"couldnt open 2.3 the file :[ "<<GRID_FILE_NAME.c_str()<<" ---- !!!"<<endl;
     if ((retval = nc_inq_varid(ncid, "V", &v_varid)))
@@ -1081,6 +1088,8 @@ vtkDataSet * ReadNcDataFile_Melike(float ** Data_out,string FileName,float ** Xc
     if ((retval = nc_get_var_double(ncid, x_varid, x_vals)))
         cout<<"couldnt open 3 the file :[ "<<GRID_FILE_NAME.c_str()<<" ---- !!!"<<endl;
     if ( (retval = nc_get_var_double(ncid, temp_varid, temp_vals)))
+        cout<<"couldnt open 4 the file :[ "<<GRID_FILE_NAME.c_str()<<" ---- !!!"<<endl;
+    if ( (retval = nc_get_var_double(ncid, salt_varid, salt_vals)))
         cout<<"couldnt open 4 the file :[ "<<GRID_FILE_NAME.c_str()<<" ---- !!!"<<endl;
     if ((retval = nc_get_var_double(ncid, u_varid, u_vals)))
         cout<<"couldnt open 4.2 the file :[ "<<GRID_FILE_NAME.c_str()<<" ---- !!!"<<endl;
@@ -1133,7 +1142,8 @@ vtkDataSet * ReadNcDataFile_Melike(float ** Data_out,string FileName,float ** Xc
     //vector<vector<double> > pn_Vec;
     //vector <double> Cs_r_Vec;
     //vector <double> S_rho_Vec;
-    vector<vector<vector<double> > > tempVals_Vec;
+    vector<vector<vector<double> > > temp_vals_Vec;
+    vector<vector<vector<double> > > salt_vals_Vec;
 
 
 
@@ -1166,13 +1176,22 @@ vtkDataSet * ReadNcDataFile_Melike(float ** Data_out,string FileName,float ** Xc
 
 
 
-    tempVals_Vec.resize(z_rho);
+    temp_vals_Vec.resize(z_rho);
     for (int i = 0; i < z_rho; ++i)
     {
-        tempVals_Vec[i].resize(y_rho);
+        temp_vals_Vec[i].resize(y_rho);
 
         for (int j = 0; j < y_rho; ++j)
-            tempVals_Vec[i][j].resize(x_rho);
+            temp_vals_Vec[i][j].resize(x_rho);
+    }
+
+    salt_vals_Vec.resize(z_rho);
+    for (int i = 0; i < z_rho; ++i)
+    {
+        salt_vals_Vec[i].resize(y_rho);
+
+        for (int j = 0; j < y_rho; ++j)
+            salt_vals_Vec[i][j].resize(x_rho);
     }
 
     /*
@@ -1265,7 +1284,23 @@ vtkDataSet * ReadNcDataFile_Melike(float ** Data_out,string FileName,float ** Xc
             for(long x=0; x < x_rho ; x++)
             {
 
-                tempVals_Vec[z][y][x]= temp_vals[dummyCounter];
+                temp_vals_Vec[z][y][x]= temp_vals[dummyCounter];
+                dummyCounter++;
+            }
+        }
+    }
+
+    dummyCounter = 0;
+
+    for(long z=0; z < z_rho ; z++)
+    {
+
+        for(long y=0; y < y_rho ; y++)
+        {
+            for(long x=0; x < x_rho ; x++)
+            {
+
+                salt_vals_Vec[z][y][x]= salt_vals[dummyCounter];
                 dummyCounter++;
             }
         }
@@ -1306,6 +1341,7 @@ vtkDataSet * ReadNcDataFile_Melike(float ** Data_out,string FileName,float ** Xc
             }
         }
     }
+    dummyCounter = 0;
     for(long z=0; z < z_rho ; z++)
     {
 
@@ -1380,6 +1416,7 @@ vtkDataSet * ReadNcDataFile_Melike(float ** Data_out,string FileName,float ** Xc
     //delete[] Cs_r;
     delete[] temp_vals;
     delete[] ETA_vals;
+    delete[] salt_vals;
 
     //----read z_r now-----
 
@@ -1640,6 +1677,9 @@ vtkDataSet * ReadNcDataFile_Melike(float ** Data_out,string FileName,float ** Xc
                 v[1] = u_vals_Vec[z][y][x];
                 v[2] = v_vals_Vec[z][y][x];
                 v[3] = ETA_vals_Vec[z][y][x];
+                v[4] = salt_vals_Vec[z][y][x];
+                v[5] = temp_vals_Vec[z][y][x];
+
                 //
                 //if numberofComponents>1 then u need to add more values to v here...
                 //
@@ -1683,6 +1723,9 @@ vtkDataSet * ReadNcDataFile_Melike(float ** Data_out,string FileName,float ** Xc
 
     returnVal = sgrid;
     int k = returnVal->GetPointData()->GetNumberOfComponents();
+    delete[] x_vals;
+    delete[] y_vals;
+    delete[] z_vals;
     /* //example of a vtk file creating is below ----
 
      vtkSmartPointer<vtkXMLStructuredGridWriter> writer = vtkSmartPointer<vtkXMLStructuredGridWriter>::New();
@@ -3603,7 +3646,7 @@ bool ReadOct(string baseName,Frame& frm,int step,  vector<vector<TrackObject> > 
     
     float mass = 0.0,cx=0.0, cy=0.0, cz=0.0, Ixx=0.0, Iyy=0.0, Izz=0.0, Ixy=0.0, Iyz=0.0, Izx=0.0;
     unsigned long numNodes = 0, vol = 0, objID = 0;
-    float dummyval_1, dummyval_2, dummyval_3;
+    float dummyval_1, dummyval_2, dummyval_3,dummyval_4,dummyval_5;
     register unsigned long i = 0, j = 0;
     unsigned long x = 0, y = 0 , z = 0,  xsize = 0, ysize = 0, zsize = 0, vertID = 0;
     float xPos = 0, yPos = 0, zPos = 0, val = 0, x1 = 0, y1 = 0, z1 = 0;
@@ -3651,12 +3694,12 @@ bool ReadOct(string baseName,Frame& frm,int step,  vector<vector<TrackObject> > 
         
         for (j=0; j<vol-1; j++)
         {
-            fp>>dummyval_1>>dummyval_2>>dummyval_3>>vertID>>x1>>y1>>z1>>val;
+            fp>>dummyval_1>>dummyval_2>>dummyval_3>>dummyval_4>>dummyval_5>>vertID>>x1>>y1>>z1>>val;
             frm.nodes[k].NodeID = vertID;
             frm.nodes[k].ObjID=i;
             k++;
         }
-        fp>>dummyval_1>>dummyval_2>>dummyval_3;
+        fp>>dummyval_1>>dummyval_2>>dummyval_3>>dummyval_4>>dummyval_5;
     }
     fp.close();
     return true;
@@ -4407,6 +4450,7 @@ TrakGroups1(int cycle,string label, vector<string> &trakTable, int currentTime )
         
         tokensforPacketFile = Tokenize(currentFramePackInfo[i].c_str()); // tokens contains the elements on each row..
         objnumber = tokensforPacketFile.size()-1; //objectnumber within the packetfile
+
         //cout<<"================inside trackpackets... objnumber=["<<objnumber<<"] & i=["<<i<<"]"<<endl;
         //objnumber = atoi(tokensforPacketFile[0].c_str()); //objectnumber within the packetfile
         //each packet has at least one object within..
@@ -4973,11 +5017,12 @@ int BeginFeatureTrack(string base_GeneratedTrackFileName, string currenttimevalu
 
 // By Weiping Hua
 // For eddy test
-void checkRotation(const std::set<vtkIdType> &PointIdSet, const std::set<vtkIdType> &CellIdSet, vtkDataArray *data, vtkDataSet * in_ds,const double Z_max, const double Z_min, string OutputOcdfile, bool& first_time, int currentTime, int ncomp, long &Uocd_objID){   //01/04/2021 By Weiping Hua
+void checkRotation(const std::set<vtkIdType> &PointIdSet, const std::set<vtkIdType> &CellIdSet, vtkDataArray *data, vtkDataSet * in_ds, const double& Z_max, const double& Z_min, const string OutputOcdfile, bool& first_time, int currentTime, int ncomp, long &Uocd_objID){   //01/04/2021 By Weiping Hua
 
     double *temp_coord3D = new double[3];
     std::set<vtkIdType> PointIdsResult;
     std::set<vtkIdType> CellIdSet_result;
+    std::set<double> z_level;
     CellIdSet_result.clear();
 
     double *temp_val;
@@ -4999,6 +5044,25 @@ void checkRotation(const std::set<vtkIdType> &PointIdSet, const std::set<vtkIdTy
             cout << "cannot open outAttr file to write\n";
     }
 
+    FILE *fpout3;
+    char OutOcd_2[256];
+    string Output_2 = OutputOcdfile;
+    Output_2 = Output_2.substr(0, Output_2.rfind("."));
+    Output_2 = Output_2 + "_tested.uocd";
+    strcpy(OutOcd_2,Output_2.c_str());
+    //cout<<"outAttr is: "<<outAttr<<"!!!!!!!!"<<endl;
+    if (first_time == false){
+        if((fpout3 = fopen(OutOcd_2, "w"))==NULL)
+            cout << "cannot open outAttr file to write\n";
+        fprintf(fpout3,"******uocd_filtered*****\n");
+        fprintf(fpout3,"%d\n",currentTime);
+        first_time = true;
+    }
+    else{
+        if((fpout3 = fopen(OutOcd_2, "a"))==NULL)
+            cout << "cannot open outAttr file to write\n";
+    }
+
 
 
 
@@ -5014,6 +5078,7 @@ void checkRotation(const std::set<vtkIdType> &PointIdSet, const std::set<vtkIdTy
 
         if (temp_coord3D[2]<Z_min + (Z_max - Z_min)*0.05){
             PointIdsResult.insert(pointindex);
+            z_level.insert(temp_coord3D[2]);
             vtkSmartPointer<vtkIdList> thispointsCellIds = vtkSmartPointer<vtkIdList>::New();
             in_ds-> GetPointCells(pointindex, thispointsCellIds);
             for(vtkIdType k = 0; k < thispointsCellIds->GetNumberOfIds(); k++)
@@ -5023,34 +5088,137 @@ void checkRotation(const std::set<vtkIdType> &PointIdSet, const std::set<vtkIdTy
         }
     }
     int filteredPoint_size = PointIdsResult.size();
-    fprintf(fpout2,"%ld\n", Uocd_objID);
-    fprintf(fpout2,"%d %f %f %f %f\n", filteredPoint_size, (float) -1.0, (float) -1.0, (float) -1.0, (float) -1.0 );
-    fprintf(fpout2,"%f %f %f %f %f %f\n", (float) -1.0, (float) -1.0, (float) -1.0, (float) -1.0, (float) -1.0, (float) -1.0);
-    Uocd_objID++;
+    int computedLayer_size = 0;
+//    fprintf(fpout2,"%ld\n", Uocd_objID);
+//    fprintf(fpout2,"%d %f %f %f %f\n", filteredPoint_size, (float) -1.0, (float) -1.0, (float) -1.0, (float) -1.0 );
+//    fprintf(fpout2,"%f %f %f %f %f %f\n", (float) -1.0, (float) -1.0, (float) -1.0, (float) -1.0, (float) -1.0, (float) -1.0);
+//    Uocd_objID++;
+
+
+
+    unsigned short z_center = ceil(double(z_level.size())/2)-1;
+    set<double>::iterator it_z = z_level.begin();
+    advance(it_z, z_center);
 
     double centroidToplayer_x = 0;
     double centroidToplayer_y = 0;
 
-    vector<pair<double,double>> coor2Ds;
+
+//    Coord_2D a = Coord_2D(2,2);
+//    Coord_2D b = Coord_2D(1,0);
+
+//    Coord_2D c = a - b;
 
 
-    Coord_2D a = Coord_2D(2,2);
-    Coord_2D b = Coord_2D(1,0);
-
-    Coord_2D c = a - b;
-
+    vtkNew<vtkPoints> pointTop;
     for(std::set<vtkIdType>::iterator it=PointIdsResult.begin(); it!=PointIdsResult.end(); ++it){
         vtkIdType pointindex = *it;
         temp_val = data->GetTuple(pointindex);
         in_ds->GetPoint(pointindex,temp_coord3D);
         fprintf(fpout2,"%6lld %9.6f %9.6f %9.6f  %f %f %f %f\n", pointindex, (float) temp_coord3D[0], (float) temp_coord3D[1], (float) temp_coord3D[2], (float) temp_val[0], (float)temp_val[1],(float)temp_val[2],(float)temp_val[3]);
-        centroidToplayer_x += temp_coord3D[0];
-        centroidToplayer_y += temp_coord3D[1];
-        coor2Ds.push_back(make_pair(temp_coord3D[0], temp_coord3D[1]));
+
+        if(temp_coord3D[2] == *it_z){
+            centroidToplayer_x += temp_coord3D[0];
+            centroidToplayer_y += temp_coord3D[1];
+            pointTop->InsertNextPoint(temp_coord3D[0],temp_coord3D[1],temp_coord3D[2]);
+            ++computedLayer_size;
+        }
+    }
+//    double* test;
+//    test = pointTop->GetPoint(0);
+//    cout<<test[0]<<test[1]<<test[2];
+
+
+
+
+    centroidToplayer_x = centroidToplayer_x/computedLayer_size;
+    centroidToplayer_y = centroidToplayer_y/computedLayer_size;
+    double* bounds = pointTop->GetBounds();
+
+
+
+    vtkNew<vtkPoints> intersectPoints;
+    vtkNew<vtkPolyData>layer_top;
+    layer_top->SetPoints(pointTop);
+
+    vtkNew<vtkStaticPointLocator> rotation_locator;
+    rotation_locator->SetDataSet(layer_top);
+    rotation_locator->AutomaticOn();
+    rotation_locator->BuildLocator();
+
+    double p0[3] = {bounds[0], centroidToplayer_y, *it_z};
+    double p1[3] = {bounds[1], centroidToplayer_y, *it_z};
+    double p2[3] = {centroidToplayer_x, bounds[2], *it_z};
+    double p3[3] = {centroidToplayer_x, bounds[3], *it_z};
+
+    vtkIdType cloest_id_0 = layer_top->FindPoint(p0[0],p0[1],p0[2]);
+    vtkIdType cloest_id_1 = layer_top->FindPoint(p1[0],p1[1],p1[2]);
+    vtkIdType cloest_id_2 = layer_top->FindPoint(p2[0],p2[1],p2[2]);
+    vtkIdType cloest_id_3 = layer_top->FindPoint(p3[0],p3[1],p3[2]);
+
+    double* point_in_ds_0 = new double[3];
+    double* point_in_ds_1 = new double[3];
+    double* point_in_ds_2 = new double[3];
+    double* point_in_ds_3 = new double[3];
+
+    layer_top->GetPoint(cloest_id_0, point_in_ds_0);
+    layer_top->GetPoint(cloest_id_1, point_in_ds_1);
+    layer_top->GetPoint(cloest_id_2, point_in_ds_2);
+    layer_top->GetPoint(cloest_id_3, point_in_ds_3);
+
+    cloest_id_0 = in_ds->FindPoint(point_in_ds_0[0],point_in_ds_0[1],point_in_ds_0[2]);
+    cloest_id_1 = in_ds->FindPoint(point_in_ds_1[0],point_in_ds_1[1],point_in_ds_1[2]);
+    cloest_id_2 = in_ds->FindPoint(point_in_ds_2[0],point_in_ds_2[1],point_in_ds_2[2]);
+    cloest_id_3 = in_ds->FindPoint(point_in_ds_3[0],point_in_ds_3[1],point_in_ds_3[2]);
+
+
+//    temp_val[1] and temp_val[2] are velocity in u and v directions
+
+//    fprintf(fpout2,"This is for eddy check\n");
+    temp_val = data->GetTuple(cloest_id_0);
+    in_ds->GetPoint(cloest_id_0,temp_coord3D);
+//    fprintf(fpout2,"%6lld %9.6f %9.6f %9.6f  %f %f %f %f\n", cloest_id_0, (float) temp_coord3D[0], (float) temp_coord3D[1], (float) temp_coord3D[2], (float) temp_val[0], (float)temp_val[1],(float)temp_val[2],(float)temp_val[3]);
+
+    float val_1 = (float)temp_val[1];
+    float val_2 = (float)temp_val[2];
+
+
+
+    temp_val = data->GetTuple(cloest_id_1);
+    in_ds->GetPoint(cloest_id_1,temp_coord3D);
+//    fprintf(fpout2,"%6lld %9.6f %9.6f %9.6f  %f %f %f %f\n", cloest_id_1, (float) temp_coord3D[0], (float) temp_coord3D[1], (float) temp_coord3D[2], (float) temp_val[0], (float)temp_val[1],(float)temp_val[2],(float)temp_val[3]);
+
+    float val_3 = (float)temp_val[1];
+    float val_4 = (float)temp_val[2];
+
+    bool eddy_flag_x_1 = (val_1*val_3<0)||(val_2*val_4<0);
+
+    temp_val = data->GetTuple(cloest_id_2);
+    in_ds->GetPoint(cloest_id_2,temp_coord3D);
+//    fprintf(fpout2,"%6lld %9.6f %9.6f %9.6f  %f %f %f %f\n", cloest_id_2, (float) temp_coord3D[0], (float) temp_coord3D[1], (float) temp_coord3D[2], (float) temp_val[0], (float)temp_val[1],(float)temp_val[2],(float)temp_val[3]);
+
+    val_1 = (float)temp_val[1];
+    val_2 = (float)temp_val[2];
+
+    temp_val = data->GetTuple(cloest_id_3);
+    in_ds->GetPoint(cloest_id_3,temp_coord3D);
+//    fprintf(fpout2,"%6lld %9.6f %9.6f %9.6f  %f %f %f %f\n", cloest_id_3, (float) temp_coord3D[0], (float) temp_coord3D[1], (float) temp_coord3D[2], (float) temp_val[0], (float)temp_val[1],(float)temp_val[2],(float)temp_val[3]);
+
+    val_1 = (float)temp_val[1];
+    val_2 = (float)temp_val[2];
+
+    bool eddy_flag_x_2 = (val_1*val_3<0)||(val_2*val_4<0);
+
+    if(eddy_flag_x_1 && eddy_flag_x_2){
+        for(std::set<vtkIdType>::iterator it=PointIdsResult.begin(); it!=PointIdsResult.end(); ++it){
+            vtkIdType pointindex = *it;
+            temp_val = data->GetTuple(pointindex);
+            in_ds->GetPoint(pointindex,temp_coord3D);
+            fprintf(fpout3,"%6lld %9.6f %9.6f %9.6f  %f %f %f %f\n", pointindex, (float) temp_coord3D[0], (float) temp_coord3D[1], (float) temp_coord3D[2], (float) temp_val[0], (float)temp_val[1],(float)temp_val[2],(float)temp_val[3]);
+        }
     }
 
-    centroidToplayer_x = centroidToplayer_x/filteredPoint_size;
-    centroidToplayer_y = centroidToplayer_y/filteredPoint_size;
+
 
 
 
@@ -5060,8 +5228,15 @@ void checkRotation(const std::set<vtkIdType> &PointIdSet, const std::set<vtkIdTy
 //    PointIdSet.clear();
 //    PointIdSet = PointIdsResult;
     fclose(fpout2);
+    fclose(fpout3);
     delete[] temp_coord3D;
+    delete[] point_in_ds_0;
+    delete[] point_in_ds_1;
+    delete[] point_in_ds_2;
+    delete[] point_in_ds_3;
 //    delete[] temp_val;
+
+
 }
 
 //-------------------MAIN FUNCTION----------------------
@@ -5082,7 +5257,7 @@ int main(void)
     float *coord_array = NULL;
     float *node_data = NULL;
     float thresh1, thresh2, deltaxval, deltayval, deltazval;
-
+    double *temp_iso_val;
     file_name = string("FeatureTrack.Conf").c_str();
     cellpoints =8;
     
@@ -5156,7 +5331,6 @@ int main(void)
         
         
         vtkDataSet * in_ds = CreateVtkDataSet(fileextension,file_name,x_dim,y_dim,z_dim,datapath,x0_dim,y0_dim,z0_dim,x1_dim,y1_dim,z1_dim);
-
         nnodes = x_dim * y_dim * z_dim;
         
         int doVolRender = 1;
@@ -5208,7 +5382,6 @@ int main(void)
         std::set<vtkIdType>::iterator it2;
         int aa = 8;// (int) cellPointIds->GetNumberOfIds(); // this is 8 for a cube /rectilinear data -- (=numberofcellpoints).
         long firstobj = -1;
-        
         
         
         std::vector<Point3D> AlltheCentroids;
@@ -5479,7 +5652,6 @@ int main(void)
                         vtkIdType thisCurrentPoint = PointIdsArray1[kt1];
                         temp_val = vtk_node_data->GetTuple(PointIdsArray1[kt1]);
                         nodevals[j2++] = temp_val[0];
-                        
                         in_ds->GetPoint(thisCurrentPoint,temp_coord);
                         for(int dim1=0; dim1<3; dim1++)
                         {
@@ -5642,7 +5814,6 @@ int main(void)
                     Trakfile<<LowerLeft_Corner_y<< "   "   <<LowerLeft_Corner_z<< "   " <<UpperRight_Corner_x << "   " ;
                     Trakfile<< UpperRight_Corner_y<< "   " <<UpperRight_Corner_z << "   "  <<MinValX    <<"   "<<MinValY    <<"   "<<MinValZ    <<"   "<<MaxValX    <<"   "<<MaxValY   <<"   "<<MaxValZ    <<"   "<<MinVal<< "   "   <<MaxVal<<endl;
                     Trakfile.close();
-                    
 
                     /********************** OutputAttribute file ***********************/
                     
@@ -5752,7 +5923,7 @@ int main(void)
                         
                         //Ocdfile<<thisCurrentPoint<<  "     "<<temp_coord[0]<< "     "<<temp_coord[1]<< "     "<<temp_coord[2]<< "     "<< temp_val[0]  <<endl;
 //                        fprintf(fpout1,"%6lld %9.6f %9.6f %9.6f  %f\n", thisCurrentPoint, (float) temp_coord[0], (float) temp_coord[1], (float) temp_coord[2], (float) temp_val[0]);
-                        fprintf(fpout1,"%6lld %9.6f %9.6f %9.6f  %f %f %f %f\n", thisCurrentPoint, (float) temp_coord[0], (float) temp_coord[1], (float) temp_coord[2], (float) temp_val[0], (float)temp_val[1],(float)temp_val[2],(float)temp_val[3]);
+                        fprintf(fpout1,"%6lld %9.6f %9.6f %9.6f  %f %f %f %f %f %f\n", thisCurrentPoint, (float) temp_coord[0], (float) temp_coord[1], (float) temp_coord[2], (float) temp_val[0], (float)temp_val[1],(float)temp_val[2],(float)temp_val[3],(float)temp_val[4],(float)temp_val[5]);
                         
                         
                     }
@@ -5786,8 +5957,8 @@ int main(void)
                     points->SetData(pcoords);
                     
                     vtkSmartPointer<vtkFloatArray> pdata = vtkSmartPointer<vtkFloatArray>::New();
-                    
-                    pdata->SetNumberOfTuples((vtkIdType)cursor);
+                    pdata->SetNumberOfTuples(cursor);
+
                     
                     double *temp_data = new double;
                     for(unsigned long i = 0; i < cursor; i++)
@@ -5795,6 +5966,7 @@ int main(void)
                         *temp_data = nodevals[i];
                         pdata->SetTuple1(i,(double)*temp_data);
                     }
+
                     
                     vtkIdType *temp_connect = new vtkIdType[cellpoints];     //int n_connect = 0;
                     
@@ -5840,12 +6012,7 @@ int main(void)
                     //outpoly2->Update();
                     isosurface->Update();
       
-                    delete temp_data;
-                    delete[] connects;
-                    delete[] coords;
-                    delete[] nodevals;
-                    delete[] temp_coord1;
-                    delete[] temp_connect;
+
                     
                     //outpoly->Register(NULL);
                     
@@ -5887,7 +6054,6 @@ int main(void)
                     
                     
                     vtkSmartPointer<vtkIdList> listconnect = vtkSmartPointer<vtkIdList>::New();
-                    
                     //vtkIdList *listconnect = vtkIdList::New();
                     pfile<<155<<" "<<155<<" "<<155<<endl;
                     pfile<<outpoly2->GetNumberOfPoints()<<endl;
@@ -5895,17 +6061,21 @@ int main(void)
                     pfile.setf(ios::fixed,ios::floatfield);
                     pfile<<setprecision(6);
                     double *temp_coord_array = new double[3];
+                    vtkIdType point_index;
+
                     for(long k3=0; k3<outpoly2->GetNumberOfPoints(); k3++)
                     {
                         temp_coord_array = outpoly2->GetPoint(k3);
+                        point_index = in_ds->FindPoint(temp_coord_array[0],temp_coord_array[1],temp_coord_array[2]);
+                        temp_iso_val = in_ds->GetPointData()->GetTensors()->GetTuple(point_index);
                         for(int k4 = 0; k4 <nspace;k4++)
                         {
-                            pfile<<temp_coord_array[k4] << " ";
+                            pfile<<temp_coord_array[k4] <<" ";
                         }
+                        pfile<<temp_iso_val[0]<<" "<<temp_iso_val[1]<<" "<<temp_iso_val[2]<<" "<<temp_iso_val[3]<<" "<<temp_iso_val[4]<<" "<<temp_iso_val[5];
                         pfile<<endl;
                     }
-                    //delete[] temp_coord_array;
-                    
+
                     pfile<<outpoly2->GetNumberOfCells()<<endl;
                     for(long i=0;i<outpoly2->GetNumberOfCells();i++)
                     {
@@ -5921,7 +6091,14 @@ int main(void)
                     pfile<<0<<endl<<endl;
                     //#cout << "finished writing poly file\n";
                     pfile.close();
- 
+                    delete temp_data;
+                    delete[] connects;
+                    delete[] coords;
+                    delete[] nodevals;
+                    delete[] temp_coord1;
+                    delete[] temp_connect;
+//                    delete[] temp_coord_array;
+//                    delete[] temp_iso_val;
                 }
             }
             
