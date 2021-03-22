@@ -4,6 +4,7 @@
 #include <fstream>
 #include <string>
 #include <algorithm>
+#include <vector>
 using namespace std;
 
 struct Consts 
@@ -27,19 +28,19 @@ the tracking information table will not be written */
 };
 
 
-/*#define Consts::MAXSPLIT  20
-#define Consts::RADIUS   1
-#define Consts::FRAMEDIST 10.0
-#define Consts::NODEDIST  2.0
-#define Consts::MAXOBJS  1000
-#define Consts::MAXLEN  100
-#define Consts::TRAKTABLE_MAXLEN  4096
-#define Consts::DEFAULT_TOLERANCE  0.0
-#define Consts::YES  true
-#define Consts::NO  false
-#define Consts::DEFAULT_TIMESTEP_NUM  200
-#define Consts::WriteTrackInfo  true
-*/
+//#define Consts::MAXSPLIT  20
+//#define Consts::RADIUS   1
+//#define Consts::FRAMEDIST 10.0
+//#define Consts::NODEDIST  2.0
+//#define Consts::MAXOBJS  1000
+//#define Consts::MAXLEN  100
+//#define Consts::TRAKTABLE_MAXLEN  4096
+//#define Consts::DEFAULT_TOLERANCE  0.0
+//#define Consts::YES  true
+//#define Consts::NO  false
+//#define Consts::DEFAULT_TIMESTEP_NUM  200
+//#define Consts::WriteTrackInfo  true
+
 
  
 
@@ -93,9 +94,9 @@ struct TrackObject
      }
      ~TrackObject()
      {
-         vector<int>().swap(parents); 
-         vector<int>().swap(children); 
-     } 
+         vector<int>().swap(parents);
+         vector<int>().swap(children);
+     }
 };
 
 struct ucdNode
@@ -211,8 +212,11 @@ struct TMPNODE
      vector<int> Pre;
   //ext+rand_wr, extend with resize(n,-1) 
 
-     TMPNODE():ObjInd(-1),Pre(vector<int>(Consts::MAXSPLIT,-1)),Suc(vector<int>(Consts::MAXSPLIT,-1)) 
+     TMPNODE()
      {
+         this->ObjInd = -1;
+         this->Suc = vector<int>(Consts::MAXSPLIT,-1);
+         this->Pre = vector<int>(Consts::MAXSPLIT,-1);
      }
      ~TMPNODE()
      {

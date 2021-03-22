@@ -393,7 +393,8 @@ bool ReadDagFile(string const Filename,int const step, vector<FRAME>& FrameList)
      string buffer;
      bool tmpfr0isNull(true);
      int numFrames(0);
-     TMPFR tmpfr0, tmpfr1;
+     TMPFR tmpfr0;
+     TMPFR tmpfr1;
      while(1)
      {
          getline(fp, buffer,'\n');
