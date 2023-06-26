@@ -92,9 +92,10 @@
 #include <limits.h>
 #include "hdf5.h"
 #include <string.h>
-//#include <time.h>
+#include <numeric>
 #include <ctime>
 #include <netcdf.h>
+#include <float.h>
 
 #include <vtkNew.h>
 #include <vtkSmartPointer.h>
@@ -126,22 +127,27 @@
 #include <vtkSmoothPolyDataFilter.h>
 #include <vtkWindowedSincPolyDataFilter.h>
 #include <vtkXMLRectilinearGridReader.h>
+#include <vtkGeometryFilter.h>
+#include <vtkKdTreePointLocator.h>
 
 /*#include"ObjSegment/ObjectSegment.C"
  #include "./Interface/interfaceutil.h"
  #include "./ObjSegment/objSegmentUtil.h"
  #include "./ObjSegment/input.h"
  */
+
+
 #include "FeatureTrack.h"
 #include "ObjectSegment.h"
 #include "interfaceutil.h"
 #include "objSegmentUtil.h"
 #include "input.h"
 #include "cellinfo.h"
-//#include "FeatureTrackUtil.h"
+#include "FeatureTrackUtil.h"
 
 
 #include "opencv2/opencv.hpp"
+
 
 
 
@@ -161,16 +167,21 @@ using namespace cv;
 const bool Greater(false);
 const bool Abs_value(false);
 enum Data_type {Scalar_data, Vector_data, Tensor_data};
-Data_type dataType = Scalar_data;
+Data_type dataType = Tensor_data;
 enum Track_type {naiveTrack, eddyTrack, eddyTrack_SSH};
-Track_type trackType  = naiveTrack;
+Track_type trackType  = eddyTrack;
 auto data_cellType = VTK_HEXAHEDRON;
+int dataset_xLength;
+int dataset_yLength;
+int dataset_zLength;
+double bounds[6];
+
 
 int const Consts::MAXSPLIT = 200;
 float const Consts::RADIUS   = 1;
 float const Consts::FRAMEDIST = 10.0;
 float const Consts::NODEDIST = 2.0;
-long  const Consts::MAXOBJS = 100000;
+long  const Consts::MAXOBJS =10000;
 int  const Consts::MAXLEN = 10000;
 int const Consts::TRAKTABLE_MAXLEN = 409600; // important, for large dataset, this const might need to be changed. Otherwise, there will be segfault. Used in TrackObjects()
 float const Consts::DEFAULT_TOLERANCE = 0.0;
@@ -184,6 +195,7 @@ const double PossibleZThreshold(-3); // Some coordinate based filtering
 const double PossibleXThreshold(0); //change to 282
 const double PossibleYThreshold(500);
 const int ThisDataType(1);
+float dynamic_threshold = 0;
 
 //-------Enriques Data Related -------------
 //const double PossibleZThreshold(-55); // Some coordinate based filtering
@@ -226,6 +238,85 @@ const int ThisDataType(1);
 //-----------------------Program Start here--------------------
 //-------------------------------------------------------------
 
+class eddyProperty{
+private:
+    vector<double> boxCenter_inDataset_x;
+    vector<double> boxCenter_inDataset_y;
+    vector<double> pointOnBoundary_inDataset_x;
+    vector<double> pointOnBoundary_inDataset_y;
+    vector<double> centerZ_inDataset;
+    vector<pair<cv::Point2d,double>> boundaryPoint_current;
+    vector<int> searchRadius;
+    vector<int> clockwiseFlag;
+    unique_ptr<double[]> temp_val;
+
+protected:
+    vtkIdType dataPoint_index;
+    double pointCoord_onBoundary[3];
+
+
+public:
+    eddyProperty(){
+        this->temp_val = unique_ptr<double[]>(new double[9]);
+    };
+
+
+    void setValue(double boxCenter_inDataset_xDATA, double boxCenter_inDataset_yDATA,double pointOnBoundary_inDataset_xDATA,double pointOnBoundary_inDataset_yDATA,double centerZ_inDatasetData,pair<cv::Point2d,double> boundaryPoint_currentDATA,double searchRadiusDATA,int clockwiseFlagDATA){
+        boxCenter_inDataset_x.push_back(boxCenter_inDataset_xDATA);
+        boxCenter_inDataset_y.push_back(boxCenter_inDataset_yDATA);
+        pointOnBoundary_inDataset_x.push_back(pointOnBoundary_inDataset_xDATA);
+        pointOnBoundary_inDataset_y.push_back(pointOnBoundary_inDataset_yDATA);
+        centerZ_inDataset.push_back(centerZ_inDatasetData);
+        boundaryPoint_current.push_back(boundaryPoint_currentDATA);
+        searchRadius.push_back(searchRadiusDATA);
+        clockwiseFlag.push_back(clockwiseFlagDATA);
+    }
+
+    void printData(FILE *fpout, const vtkNew<vtkKdTreePointLocator>& KDTree, vtkSmartPointer<vtkDataSet>& in_ds, int timeFrame, int objIdInSequence){
+
+
+        for(unsigned long i=0; i<std::size(boxCenter_inDataset_x);i++){
+            pointCoord_onBoundary[0] = pointOnBoundary_inDataset_x[i];
+            pointCoord_onBoundary[1] = pointOnBoundary_inDataset_y[i];
+            pointCoord_onBoundary[2] = centerZ_inDataset[i];
+            dataPoint_index = KDTree->FindClosestPoint(pointCoord_onBoundary);
+            in_ds->GetPointData()->GetTensors()->GetTuple(dataPoint_index,temp_val.get());
+
+            fprintf(fpout," %9.6f %9.6f %9.6f %9.6f %9.6f %f %f %f %f %f %f %d %d %d %d %d\n", boxCenter_inDataset_x[i],boxCenter_inDataset_y[i],pointOnBoundary_inDataset_x[i], pointOnBoundary_inDataset_y[i],centerZ_inDataset[i], (float) temp_val[0], (float)temp_val[1],(float)temp_val[2],(float)temp_val[3],(float)temp_val[4],(float)temp_val[5], 0,searchRadius[i],clockwiseFlag[i],timeFrame, objIdInSequence);
+        }
+    }
+
+    void clearData(){
+        boxCenter_inDataset_x.clear();
+        boxCenter_inDataset_y.clear();
+        pointOnBoundary_inDataset_x.clear();
+        pointOnBoundary_inDataset_y.clear();
+        centerZ_inDataset.clear();
+        boundaryPoint_current.clear();
+        searchRadius.clear();
+        clockwiseFlag.clear();
+    }
+
+    void reserveSize(int dataSize){
+        boxCenter_inDataset_x.reserve(dataSize);
+        boxCenter_inDataset_y.reserve(dataSize);
+        pointOnBoundary_inDataset_x.reserve(dataSize);
+        pointOnBoundary_inDataset_y.reserve(dataSize);
+        centerZ_inDataset.reserve(dataSize);
+        boundaryPoint_current.reserve(dataSize);
+        searchRadius.reserve(dataSize);
+        clockwiseFlag.reserve(dataSize);
+    }
+
+    bool getRotation(){
+        if(clockwiseFlag[0]==0)
+            return 0;
+        else
+            return 1;
+    }
+};
+
+
 string precision_time(int const time,int const precision)
 {
     int quotient = time, remainder=0;
@@ -252,7 +343,7 @@ string precision_time(int const time,int const precision)
 
 
 
-vtkDataSet * ReadNcDataFile_Backup(float ** Data_out,string FileName,float ** Xcoord, float**Ycoord, float **Zcoord, int x_dim, int y_dim, int z_dim, int numberofComponents)
+vtkSmartPointer<vtkDataSet> ReadNcDataFile_Backup(float ** Data_out,string FileName,float ** Xcoord, float**Ycoord, float **Zcoord, int x_dim, int y_dim, int z_dim, int numberofComponents)
 {
     
     //this function first reads a specific netCDF file and creates a (curvilinear) vtkDataSet from the read data.
@@ -824,7 +915,7 @@ vtkDataSet * ReadNcDataFile_Backup(float ** Data_out,string FileName,float ** Xc
                         d_v_x = v_vals_Vec[ x-1 ][y-2][z]  -  v_vals_Vec[x-2][y-2][z];
                     else
                         d_v_x = v_vals_Vec[ x-1 ][y][z]  -  v_vals_Vec[x-2][y][z];
-                                         
+
                 }
                 else
                 {
@@ -963,7 +1054,7 @@ vtkDataSet * ReadNcDataFile_Backup(float ** Data_out,string FileName,float ** Xc
     return returnVal; 
 }
 
-vtkDataSet * ReadNcDataFile_Melike(float ** Data_out,string FileName,float ** Xcoord, float**Ycoord, float **Zcoord, int x_dim, int y_dim, int z_dim, int numberofComponents)
+vtkSmartPointer<vtkDataSet> ReadNcDataFile_Singleframe(float ** Data_out,string FileName,float ** Xcoord, float**Ycoord, float **Zcoord, int x_dim, int y_dim, int z_dim,  double* zLevels,int numberofComponents)
 {
 
     //this function first reads a specific netCDF file and creates a (curvilinear) vtkDataSet from the read data.
@@ -992,14 +1083,13 @@ vtkDataSet * ReadNcDataFile_Melike(float ** Data_out,string FileName,float ** Xc
     //double * ZetaVals   = new double [eta_rho*xi_rho];
     double *u_vals = new double[x_rho*y_rho*z_rho];
     double *v_vals = new double[x_rho*y_rho*z_rho];
-    double *ETA_vals = new double[x_rho*y_rho*z_rho];
     double *temp_vals = new double [x_rho*y_rho*z_rho];
     double *salt_vals = new double [x_rho*y_rho*z_rho];
     //double * ocean_time_Vals = new double [1];
 
     int ncid;// pres_varid, temp_varid;
     //int lat_varid, lon_varid, Tcline_varid, h_varid, Cs_r_varid, Cs_w_varid, u_Vals_varid, v_Vals_varid;
-    int z_varid, y_varid, x_varid, u_varid, v_varid, temp_varid, salt_varid, ETA_varid;
+    int z_varid, y_varid, x_varid, u_varid, v_varid, temp_varid, salt_varid;
     //int ocean_time__varid, pm_varid, pn_varid ;
     size_t start[NDIMS], count[NDIMS];
     double hc;
@@ -1037,8 +1127,6 @@ vtkDataSet * ReadNcDataFile_Melike(float ** Data_out,string FileName,float ** Xc
         cout<<"couldnt open 2.3 the file :[ "<<GRID_FILE_NAME.c_str()<<" ---- !!!"<<endl;
     if ((retval = nc_inq_varid(ncid, "V", &v_varid)))
         cout<<"couldnt open 2.3.1 the file :[ "<<GRID_FILE_NAME.c_str()<<" ---- !!!"<<endl;
-    if ((retval = nc_inq_varid(ncid, "ETA", &ETA_varid)))
-        cout<<"couldnt open 2.3.1 the file :[ "<<GRID_FILE_NAME.c_str()<<" ---- !!!"<<endl;
 
     /* Read the coordinate variable data. */
 
@@ -1056,8 +1144,7 @@ vtkDataSet * ReadNcDataFile_Melike(float ** Data_out,string FileName,float ** Xc
         cout<<"couldnt open 4.2 the file :[ "<<GRID_FILE_NAME.c_str()<<" ---- !!!"<<endl;
     if ((retval = nc_get_var_double(ncid, v_varid, v_vals)))
         cout<<"couldnt open 4.3 the file :[ "<<GRID_FILE_NAME.c_str()<<" ---- !!!"<<endl;
-    if ((retval = nc_get_var_double(ncid, ETA_varid, ETA_vals)))
-        cout<<"couldnt open 4.3 the file :[ "<<GRID_FILE_NAME.c_str()<<" ---- !!!"<<endl;
+
 
 
     count[0] = 1;
@@ -1094,7 +1181,6 @@ vtkDataSet * ReadNcDataFile_Melike(float ** Data_out,string FileName,float ** Xc
     vector<vector<vector<double> > > OW_vals_Vec;
     vector<vector<vector<double> > > u_vals_Vec;
     vector<vector<vector<double> > > v_vals_Vec;
-    vector<vector<vector<double> > > ETA_vals_Vec;
     //vector<vector<double> > ZetaVals_Vec;
     //vector<vector<double> > hVals_Vec;
     //vector<vector<double> > lat_rho_Vec;
@@ -1191,14 +1277,7 @@ vtkDataSet * ReadNcDataFile_Melike(float ** Data_out,string FileName,float ** Xc
         for (int j = 0; j < y_rho; ++j)
             v_vals_Vec[i][j].resize(x_rho);
     }
-    ETA_vals_Vec.resize(z_rho);
-    for (int i = 0; i < z_rho; ++i)
-    {
-        ETA_vals_Vec[i].resize(y_rho);
 
-        for (int j = 0; j < y_rho; ++j)
-            ETA_vals_Vec[i][j].resize(x_rho);
-    }
     /*
     hVals_Vec.resize(xi_rho);
     for (int i = 0; i < xi_rho; ++i)
@@ -1302,22 +1381,7 @@ vtkDataSet * ReadNcDataFile_Melike(float ** Data_out,string FileName,float ** Xc
             }
         }
     }
-    dummyCounter = 0;
-    for(long z=0; z < z_rho ; z++)
-    {
 
-        for(long y=0; y < y_rho; y++)
-        {
-            for(long x=0; x < x_rho ; x++)
-            {
-                if (ETA_vals[dummyCounter]< 100000000)
-                    ETA_vals_Vec[z][y][x]= ETA_vals[dummyCounter];
-                else
-                    ETA_vals_Vec[z][y][x]= 0;
-                dummyCounter++;
-            }
-        }
-    }
 
 
     /*
@@ -1376,7 +1440,6 @@ vtkDataSet * ReadNcDataFile_Melike(float ** Data_out,string FileName,float ** Xc
    // delete[] s_rVals;
     //delete[] Cs_r;
     delete[] temp_vals;
-    delete[] ETA_vals;
     delete[] salt_vals;
 
     //----read z_r now-----
@@ -1438,15 +1501,15 @@ vtkDataSet * ReadNcDataFile_Melike(float ** Data_out,string FileName,float ** Xc
     cout<<"--------------------- Test 3 --------------------------"<<endl;
 
     static int dims[3] = { x_rho, y_rho, z_rho };
-    vtkDataSet * returnVal;
-    vtkStructuredGrid *sgrid = vtkStructuredGrid::New();
+    vtkSmartPointer<vtkDataSet> returnVal;
+    vtkNew<vtkStructuredGrid> sgrid;
     sgrid->SetDimensions( dims );
 
-    vtkFloatArray *vectors = vtkFloatArray::New();
+    vtkNew<vtkFloatArray> vectors;
     vectors->SetNumberOfComponents(numberofComponents);
     vectors->SetNumberOfTuples( dims[0] * dims[1] * dims[2] );
 
-    vtkPoints *points = vtkPoints::New();
+    vtkNew<vtkPoints> points;
     points->Allocate( dims[0] * dims[1] * dims[2] );
 
     double dummyMax = 0;
@@ -1605,12 +1668,19 @@ vtkDataSet * ReadNcDataFile_Melike(float ** Data_out,string FileName,float ** Xc
 
 
 
-               // S_n =  ( d_u_x * pm_Vec[x][y] ) - (d_v_y * pn_Vec[x][y]);//            pm pn?
-                S_n =  d_u_x* x_vals[x]  - d_v_y* y_vals[y]  ;
-                //S_s =    (d_v_x * pm_Vec[x][y]) + (d_u_y * pn_Vec[x][y]);                     ?
-                S_s =  d_v_x* x_vals[x]  + d_u_y*y_vals[y]  ;
-                //w_val =  (d_v_x * pm_Vec[x][y]) - (d_u_y * pn_Vec[x][y]);                     ?
-                w_val = d_v_x* x_vals[x]  - d_u_y*y_vals[y] ;
+//               // S_n =  ( d_u_x * pm_Vec[x][y] ) - (d_v_y * pn_Vec[x][y]);//            pm pn?
+//                S_n =  d_u_x* x_vals[x]  - d_v_y* y_vals[y]  ;
+//                //S_s =    (d_v_x * pm_Vec[x][y]) + (d_u_y * pn_Vec[x][y]);                     ?
+//                S_s =  d_v_x* x_vals[x]  + d_u_y*y_vals[y]  ;
+//                //w_val =  (d_v_x * pm_Vec[x][y]) - (d_u_y * pn_Vec[x][y]);                     ?
+//                w_val = d_v_x* x_vals[x]  - d_u_y*y_vals[y] ;
+
+                // S_n =  ( d_u_x * pm_Vec[x][y] ) - (d_v_y * pn_Vec[x][y]);//            pm pn?
+                 S_n =  d_u_x  - d_v_y  ;
+                 //S_s =    (d_v_x * pm_Vec[x][y]) + (d_u_y * pn_Vec[x][y]);                     ?
+                 S_s =  d_v_x  + d_u_y  ;
+                 //w_val =  (d_v_x * pm_Vec[x][y]) - (d_u_y * pn_Vec[x][y]);                     ?
+                 w_val = d_v_x  - d_u_y ;
 
                 OW_vals_Vec[z][y][x] =  ( S_n * S_n ) + ( S_s * S_s ) - ( w_val * w_val );    //?
 
@@ -1632,19 +1702,22 @@ vtkDataSet * ReadNcDataFile_Melike(float ** Data_out,string FileName,float ** Xc
                 else if (currentPointVal < dummyMin )
                     dummyMin = currentPointVal;
 
-                float * v = new float[numberofComponents];
+                float v[numberofComponents];
                 v[0] = (float) currentPointVal;
                 v[1] = u_vals_Vec[z][y][x];
                 v[2] = v_vals_Vec[z][y][x];
-                v[3] = ETA_vals_Vec[z][y][x];
+                v[3] = 0;
                 v[4] = salt_vals_Vec[z][y][x];
                 v[5] = temp_vals_Vec[z][y][x];
+                v[6] = 0;
+                v[7] = 0;
+                v[8] = 0;
 
                 //
                 //if numberofComponents>1 then u need to add more values to v here...
                 //
                 vectors->InsertTuple(omageIndex,v);
-                delete [] v;
+//                delete [] v;
                 omageIndex++;
             }
 
@@ -1657,7 +1730,6 @@ vtkDataSet * ReadNcDataFile_Melike(float ** Data_out,string FileName,float ** Xc
     sgrid->SetPoints(points);
 
 
-    points->Delete();
 
     if (numberofComponents>3)
         sgrid->GetPointData()->SetTensors(vectors);
@@ -1667,22 +1739,22 @@ vtkDataSet * ReadNcDataFile_Melike(float ** Data_out,string FileName,float ** Xc
         sgrid->GetPointData()->SetScalars(vectors);
     else
         cout<<"something is wrong with the numberofComponents. Check it please!"<<endl;
-    vectors->Delete();
 
 
-    // Write file
-    vtkSmartPointer<vtkXMLStructuredGridWriter> writer =   vtkSmartPointer<vtkXMLStructuredGridWriter>::New();
-    writer->SetFileName("outputEnrique.vts");
-    #if VTK_MAJOR_VERSION <= 5
-        writer->SetInput(sgrid);
-    #else
-        writer->SetInputData(sgrid);
-    #endif
-        writer->Write();
+//     Write file
+//    vtkSmartPointer<vtkXMLStructuredGridWriter> writer =   vtkSmartPointer<vtkXMLStructuredGridWriter>::New();
+//    writer->SetFileName("outputEnrique.vts");
+//    #if VTK_MAJOR_VERSION <= 5
+//        writer->SetInput(sgrid);
+//    #else
+//        writer->SetInputData(sgrid);
+//    #endif
+//        writer->Write();
 
 
     returnVal = sgrid;
     int k = returnVal->GetPointData()->GetNumberOfComponents();
+    memcpy(zLevels, z_vals, sizeof(double)*z_rho);
     delete[] x_vals;
     delete[] y_vals;
     delete[] z_vals;
@@ -1704,6 +1776,1468 @@ vtkDataSet * ReadNcDataFile_Melike(float ** Data_out,string FileName,float ** Xc
 
     return returnVal;
 }
+
+
+vtkSmartPointer<vtkDataSet> ReadNcDataFile_Multiframe_2D(float ** Data_out,string FileName,float ** Xcoord, float**Ycoord, float **Zcoord, int x_dim, int y_dim, int z_dim,  double* zLevels,int numberofComponents, unsigned long timeframe)
+{
+
+    //this function first reads a specific netCDF file and creates a (curvilinear) vtkDataSet from the read data.
+    // This file returns the content of the file in the vtkDataSet format.
+
+    string GRID_FILE_NAME;// = "/home/aydogan/Desktop/temp.nc";/////////////?
+
+    static int NDIMS = 4;//?
+    const size_t x_rho = x_dim;
+    const size_t y_rho = y_dim;
+    const size_t z_rho = z_dim;
+    int ocean_time = 1;
+    //double Tcline=0.1;//"S-coordinate surface/bottom layer width - need to change but not known the how to change
+    int retval;
+   // double * Cs_r = new double [z_rho];
+   // double * Cs_w = new double [s_w];  lon_rho
+
+    //double * pm = new double[eta_rho*xi_rho];//?
+    //double * pn = new double[eta_rho*xi_rho];//?
+   // double * h = new double [eta_rho*xi_rho];//?
+    //double * lon_rho = new double [y_rho*x_rho];
+    //double * lat_rho = new double [y_rho*x_rho];
+
+
+
+    shared_ptr<double[]> z_vals(new double [z_rho]);
+    z_vals[0] = 1;
+    shared_ptr<double[]> y_vals(new double [y_rho]);
+    shared_ptr<double[]> x_vals(new double [x_rho]);
+    //double * ZetaVals   = new double [eta_rho*xi_rho];
+    shared_ptr<double[]> u_vals(new double[x_rho*y_rho*z_rho]);
+    shared_ptr<double[]> v_vals(new double[x_rho*y_rho*z_rho]);
+    shared_ptr<double[]> temp_vals(new double [x_rho*y_rho*z_rho]);
+    shared_ptr<double[]> salt_vals(new double [x_rho*y_rho*z_rho]);
+
+
+
+    //double * ocean_time_Vals = new double [1];
+
+    int ncid;// pres_varid, temp_varid;
+    //int lat_varid, lon_varid, Tcline_varid, h_varid, Cs_r_varid, Cs_w_varid, u_Vals_varid, v_Vals_varid;
+    int z_varid, y_varid, x_varid, u_varid, v_varid, temp_varid, salt_varid;
+    //int ocean_time__varid, pm_varid, pn_varid ;
+    size_t start[NDIMS], count[NDIMS];
+    size_t dataStart[] = {timeframe,0,0};
+    size_t dataCount[] = {1,y_rho,x_rho};
+    double hc;
+
+    ///-------read grid file first ----------
+   // if ((retval = nc_open(GRID_FILE_NAME.c_str(), NC_NOWRITE, &ncid)))
+     //   cout<<"couldnt open the file :[ "<<GRID_FILE_NAME.c_str()<<" ---- !!!"<<endl;
+
+
+
+   // int status = nc_close(ncid);       /* close netCDF dataset */
+    //if (status != NC_NOERR) cout<<"couldnt open 5 the file :[ "<<GRID_FILE_NAME.c_str()<<" ---- !!!"<<endl;
+
+
+
+   // hc= Tcline;
+
+    ///-------read the data file now ----------
+
+    if ((retval = nc_open(FileName.c_str(), NC_NOWRITE, &ncid)))
+        cout<<"couldnt open the file :[ "<<GRID_FILE_NAME.c_str()<<" ---- !!!"<<endl;
+
+
+    if ((retval = nc_inq_varid(ncid, "yh", &y_varid)))
+        cout<<"couldnt open 2 the file :[ "<<GRID_FILE_NAME.c_str()<<" ---- !!!"<<endl;
+    if ((retval = nc_inq_varid(ncid, "xh", &x_varid)))
+        cout<<"couldnt open 2.1 the file :[ "<<GRID_FILE_NAME.c_str()<<" ---- !!!"<<endl;
+    if ((retval = nc_inq_varid(ncid, "tos", &temp_varid)))
+        cout<<"couldnt open 2.2 the file :[ "<<GRID_FILE_NAME.c_str()<<" ---- !!!"<<endl;
+    if ((retval = nc_inq_varid(ncid, "sos", &salt_varid)))
+        cout<<"couldnt open 2.2 the file :[ "<<GRID_FILE_NAME.c_str()<<" ---- !!!"<<endl;
+    if ((retval = nc_inq_varid(ncid, "ssu", &u_varid)))
+        cout<<"couldnt open 2.3 the file :[ "<<GRID_FILE_NAME.c_str()<<" ---- !!!"<<endl;
+    if ((retval = nc_inq_varid(ncid, "ssv", &v_varid)))
+        cout<<"couldnt open 2.3.1 the file :[ "<<GRID_FILE_NAME.c_str()<<" ---- !!!"<<endl;
+
+    /* Read the coordinate variable data. */
+
+
+    if ((retval = nc_get_var_double(ncid, y_varid, y_vals.get())))
+        cout<<"couldnt open 3 the file :[ "<<GRID_FILE_NAME.c_str()<<" ---- !!!"<<endl;
+    if ((retval = nc_get_var_double(ncid, x_varid, x_vals.get())))
+        cout<<"couldnt open 3 the file :[ "<<GRID_FILE_NAME.c_str()<<" ---- !!!"<<endl;
+    if ( (retval = nc_get_vara_double(ncid, temp_varid, dataStart,dataCount,temp_vals.get())))
+        cout<<"couldnt open 4 the file :[ "<<GRID_FILE_NAME.c_str()<<" ---- !!!"<<endl;
+    if ( (retval = nc_get_vara_double(ncid, salt_varid, dataStart,dataCount,salt_vals.get())))
+        cout<<"couldnt open 4 the file :[ "<<GRID_FILE_NAME.c_str()<<" ---- !!!"<<endl;
+    if ((retval = nc_get_vara_double(ncid, u_varid, dataStart,dataCount,u_vals.get())))
+        cout<<"couldnt open 4.2 the file :[ "<<GRID_FILE_NAME.c_str()<<" ---- !!!"<<endl;
+    if ((retval = nc_get_vara_double(ncid, v_varid, dataStart,dataCount,v_vals.get())))
+        cout<<"couldnt open 4.3 the file :[ "<<GRID_FILE_NAME.c_str()<<" ---- !!!"<<endl;
+
+    count[0] = 1;
+    count[1] = z_rho;
+    count[2] = y_rho;
+    count[3] = x_rho;
+    start[1] = 0;
+    start[2] = 0;
+    start[3] = 0;
+    start[0] = 0;
+    static size_t start1[] = {0, 0, 0}; /* start at first value */
+    static size_t count1[] = {1, (size_t)y_rho, (size_t)x_rho};
+    // cout<<"--------------------- Test 100 --------------------------"<<endl;
+    // // cout<<"pres_varid=["<<pres_varid<<"]"<<endl;
+    // if ((retval = nc_inq_varid(ncid, "temp", &pres_varid)))
+    //     cout<<"couldnt open 9 the file :[ "<<FileName.c_str()<<" ---- !!!"<<endl;
+
+    // if ((retval = nc_get_vara_double(ncid, pres_varid, start, count, tempVals)))
+    //     cout<<"couldnt open 9.1 the file :[ "<<FileName.c_str()<<" ---- !!!"<<endl;
+
+    // if ((retval = nc_inq_varid(ncid, "zeta", &lon_varid)))
+    //     cout<<"couldnt open 9.5 the file :[ "<<FileName.c_str()<<" ---- !!!"<<endl;
+
+    // if ((retval = nc_get_vara_double(ncid, lon_varid, start1, count1, ZetaVals)))
+    //     cout<<"couldnt open 9.7 the file :[ "<<FileName.c_str()<<" ---- !!!"<<endl;
+    // cout<<"--------------------- Test 101 --------------------------"<<endl;
+    int status;
+    status = nc_close(ncid);
+    if (status != NC_NOERR) cout<<"couldnt open 10 the file :[ "<<FileName.c_str()<<" ---- !!!"<<endl;
+
+    /* close netCDF dataset */
+
+
+    vector<vector<vector<double> > > OW_vals_Vec;
+    vector<vector<vector<double> > > u_vals_Vec;
+    vector<vector<vector<double> > > v_vals_Vec;
+    //vector<vector<double> > ZetaVals_Vec;
+    //vector<vector<double> > hVals_Vec;
+    //vector<vector<double> > lat_rho_Vec;
+    //vector<vector<double> > lon_rho_Vec;
+    //vector<vector<double> > pm_Vec;
+    //vector<vector<double> > pn_Vec;
+    //vector <double> Cs_r_Vec;
+    //vector <double> S_rho_Vec;
+    vector<vector<vector<double> > > temp_vals_Vec;
+    vector<vector<vector<double> > > salt_vals_Vec;
+
+
+
+    /*
+    S_rho_Vec.resize(s_r);
+    Cs_r_Vec.resize(s_r);
+
+    lat_rho_Vec.resize(xi_rho);  //  xi_rho = 722
+    for (int i = 0; i < xi_rho; ++i)
+    {
+        lat_rho_Vec[i].resize(eta_rho);// eta_rho = 362
+
+    }
+
+
+    lon_rho_Vec.resize(xi_rho);  //  xi_rho = 722
+    for (int i = 0; i < xi_rho; ++i)
+    {
+        lon_rho_Vec[i].resize(eta_rho);// eta_rho = 362
+
+    }
+
+
+    pm_Vec.resize(xi_rho);  //  xi_rho = 722
+    for (int i = 0; i < xi_rho; ++i)
+    {
+        pm_Vec[i].resize(eta_rho);// eta_rho = 362
+
+    }*/
+
+
+
+    temp_vals_Vec.resize(z_rho);
+    for (int i = 0; i < z_rho; ++i)
+    {
+        temp_vals_Vec[i].resize(y_rho);
+
+        for (int j = 0; j < y_rho; ++j)
+            temp_vals_Vec[i][j].resize(x_rho);
+    }
+
+    salt_vals_Vec.resize(z_rho);
+    for (int i = 0; i < z_rho; ++i)
+    {
+        salt_vals_Vec[i].resize(y_rho);
+
+        for (int j = 0; j < y_rho; ++j)
+            salt_vals_Vec[i][j].resize(x_rho);
+    }
+
+    /*
+    pn_Vec.resize(xi_rho);
+    for (int i = 0; i < xi_rho; ++i)
+    {
+        pn_Vec[i].resize(eta_rho);
+
+    }
+    */
+    OW_vals_Vec.resize(z_rho);
+    for (int i = 0; i < z_rho; ++i)
+    {
+        OW_vals_Vec[i].resize(y_rho);
+
+        for (int j = 0; j < y_rho; ++j)
+            OW_vals_Vec[i][j].resize(x_rho);
+    }
+
+    u_vals_Vec.resize(z_rho);
+    for (int i = 0; i < z_rho; ++i)
+    {
+        u_vals_Vec[i].resize(y_rho);
+
+        for (int j = 0; j < y_rho; ++j)
+            u_vals_Vec[i][j].resize(x_rho);
+    }
+
+
+
+    v_vals_Vec.resize(z_rho);
+    for (int i = 0; i < z_rho; ++i)
+    {
+        v_vals_Vec[i].resize(y_rho);
+
+        for (int j = 0; j < y_rho; ++j)
+            v_vals_Vec[i][j].resize(x_rho);
+    }
+
+    /*
+    hVals_Vec.resize(xi_rho);
+    for (int i = 0; i < xi_rho; ++i)
+    {
+        hVals_Vec[i].resize(eta_rho);
+    }
+
+
+    ZetaVals_Vec.resize(xi_rho);
+    for (int i = 0; i < xi_rho; ++i)
+    {
+        ZetaVals_Vec[i].resize(eta_rho);
+    }
+    */
+
+    cout<<"--------------------- Test 1 .0 --------------------------"<<endl;
+
+
+    long dummyCounter = 0;
+
+   /*for(long y=0; y < z_rho ; y++)
+    {
+        z_rho_Vec[y] = z_vals[y];
+        //cout<<"S_rho_Vec["<<y<<"]=["<<S_rho_Vec[y]<<"]"<<endl;
+
+    }
+
+    /*
+    for(long y=0; y < s_r ; y++)
+    {
+        Cs_r_Vec[y] = Cs_r[y];
+        //cout<<"Cs_r_Vec["<<y<<"]=["<<Cs_r_Vec[y]<<"]"<<endl;
+
+    }
+    */
+
+    dummyCounter = 0;
+
+    for(long z=0; z < z_rho ; z++)
+    {
+
+        for(long y=0; y < y_rho ; y++)
+        {
+            for(long x=0; x < x_rho ; x++)
+            {
+
+                temp_vals_Vec[z][y][x]= temp_vals[dummyCounter];
+                dummyCounter++;
+            }
+        }
+    }
+
+    dummyCounter = 0;
+
+    for(long z=0; z < z_rho ; z++)
+    {
+
+        for(long y=0; y < y_rho ; y++)
+        {
+            for(long x=0; x < x_rho ; x++)
+            {
+
+                salt_vals_Vec[z][y][x]= salt_vals[dummyCounter];
+                dummyCounter++;
+            }
+        }
+    }
+
+
+    dummyCounter = 0;
+    for (long z=0; z < z_rho ; z++)
+    {
+
+        for(long y=0; y < y_rho ; y++)
+        {
+            for(long x=0; x < x_rho ; x++)
+            {
+                if (u_vals[dummyCounter]< 100000000)
+                    u_vals_Vec[z][y][x]= u_vals[dummyCounter];
+                else
+                    u_vals_Vec[z][y][x]= 0;
+                dummyCounter++;
+            }
+        }
+    }
+
+
+    dummyCounter = 0;
+    for(long z=0; z < z_rho ; z++)
+    {
+
+        for(long y=0; y < y_rho; y++)
+        {
+            for(long x=0; x < x_rho ; x++)
+            {
+                if (v_vals[dummyCounter]< 100000000)
+                    v_vals_Vec[z][y][x]= v_vals[dummyCounter];
+                else
+                    v_vals_Vec[z][y][x]= 0;
+                dummyCounter++;
+            }
+        }
+    }
+
+
+
+    /*
+    dummyCounter = 0;
+    for(long y=0; y < y_rho; y++)
+    {
+        for(long x=0; x < x_rho ; x++)
+        {
+
+            hVals_Vec[x][y]= h[dummyCounter];
+            dummyCounter++;
+            //cout<<"hVals_Vec["<<x<<"]["<<y<<"]=["<<hVals_Vec[x][y] <<"]"<<endl;
+        }
+    }
+
+    dummyCounter = 0;
+    for(long y=0; y < eta_rho; y++)
+    {
+        for(long x=0; x < xi_rho ; x++)
+        {
+            if (pm[dummyCounter]< 100000000)
+                pm_Vec[x][y]= pm[dummyCounter];
+            else
+                pm_Vec[x][y]= 0;
+            dummyCounter++;
+        }
+    }
+
+
+    dummyCounter = 0;
+    for(long y=0; y < eta_rho; y++)
+    {
+        for(long x=0; x < xi_rho ; x++)
+        {
+            if (pn[dummyCounter]< 100000000)
+                pn_Vec[x][y]= pn[dummyCounter];
+            else
+                pn_Vec[x][y]= 0;
+            dummyCounter++;
+        }
+    }
+    */
+
+
+    cout<<"--------------------- Test 1 .01 --------------------------"<<endl;
+
+
+    cout<<"--------------------- Test 1 --------------------------"<<endl;
+
+
+//    delete[] u_vals;
+//    delete[] v_vals;
+   // delete[] h;
+    //delete[] pm;
+   // delete[] pn;
+   // delete[] s_rVals;
+    //delete[] Cs_r;
+//    delete[] temp_vals;
+//    delete[] salt_vals;
+
+    //----read z_r now-----
+
+    cout<<"--------------------- Test 2 --------------------------"<<endl;
+
+    /*
+    dummyCounter = 0;
+    for(long y=0; y < eta_rho; y++)
+    {
+        for(long x=0; x < xi_rho ; x++)
+        {
+            if (ZetaVals[dummyCounter] < 100000)
+                ZetaVals_Vec[x][y]= ZetaVals[dummyCounter];
+            else
+                ZetaVals_Vec[x][y]= 0;
+
+           // cout<<"ZetaVals_Vec["<<x<<"]["<<y<<"]=["<<ZetaVals_Vec[x][y] <<"]"<<endl;
+
+            dummyCounter++;
+        }
+    }
+
+    delete[] ZetaVals;
+
+
+    dummyCounter = 0;
+
+    for(long y=0; y < eta_rho; y++)
+    {
+        for(long x=0; x < xi_rho ; x++)
+        {
+
+            lat_rho_Vec[x][y]= lat_rho[dummyCounter];
+            dummyCounter++;
+
+        }
+    }
+
+
+    delete[] lat_rho;
+
+
+    dummyCounter = 0;
+    for(long y=0; y < eta_rho; y++)
+    {
+        for(long x=0; x < xi_rho ; x++)
+        {
+
+            lon_rho_Vec[x][y]= lon_rho[dummyCounter];
+            dummyCounter++;
+        }
+    }
+
+
+    delete[] lon_rho;
+    */
+
+    cout<<"--------------------- Test 3 --------------------------"<<endl;
+
+    static int dims[3] = { x_dim, y_dim, z_dim };
+    vtkSmartPointer<vtkDataSet> returnVal;
+    vtkNew<vtkStructuredGrid> sgrid;
+    sgrid->SetDimensions( dims );
+
+    vtkNew<vtkFloatArray> vectors;
+    vectors->SetNumberOfComponents(numberofComponents);
+    vectors->SetNumberOfTuples( dims[0] * dims[1] * dims[2] );
+
+    vtkNew<vtkPoints> points;
+    points->Allocate( dims[0] * dims[1] * dims[2] );
+
+    double dummyMax = 0;
+    double dummyMin = 1e+37;
+    double currentXVal, currentYVal, currentZVal,z_o;
+    //double currentZ_rho, currentCs_r;
+
+    cout<<"--------------------- Test 4 --------------------------"<<endl;
+    cout<<"Before the loop!"<<endl;
+    long omageIndex = 0;
+    double maxZval=-10;
+    double minZval=1000000;
+
+
+    double maxYval=-1000;
+    double minYval=1000000;
+
+
+    double maxXval=-1000;
+    double minXval=100000;
+    for(long z=0; z < z_rho ; z++)
+    {
+        //long dummyCounter = 0;
+        for(long y=0; y < y_rho ; y++)
+        {
+            for(long x=0; x < x_rho ; x++)
+            {
+               // cout<<"--------------------- inside loop ["<< omageIndex << "] -------------1-------------"<<endl;
+                //    compute z and  values here first.....
+                //currentZ_rho = Z_rho_Vec [z];
+               // currentCs_r = Cs_r_Vec[z];
+
+                //z_o = (hc * currentS_rho ) + ( h[dummyCounter] * currentCs_r );
+                //z_o = z_o / (h[dummyCounter]+hc);
+                //z_o = (hc * currentZ_rho ) + ( hVals_Vec[x][y] * currentCs_r );
+                //z_o = z_o / (hVals_Vec[x][y]+hc);///////////?
+
+
+                //z_r [omageIndex] = ZetaVals[dummyCounter] +  (ZetaVals[dummyCounter] + h[dummyCounter]) * z_o;
+                //currentZVal = ZetaVals[dummyCounter] +  (ZetaVals[dummyCounter] + h[dummyCounter]) * z_o;
+                //currentZVal = ZetaVals_Vec[x][y] +  (ZetaVals_Vec[x][y] + hVals_Vec[x][y]) * z_o;
+                currentZVal = z_vals[z];
+                //cout<<"currentS_rho=["<<currentS_rho <<"], currentCs_r=["<<currentCs_r  <<"], hVals_Vec["<<x<<"]["<<y<<"]=["  <<hVals_Vec[x][y]  <<"],  ZetaVals_Vec["<<x<<"]["<<y<<"]=["  << ZetaVals_Vec[x][y] <<"]-----"<<endl;
+                if (currentZVal >100000)
+                    currentZVal = 10;
+
+                if (currentZVal < minZval)
+                    minZval = currentZVal;// = 0;
+
+
+                if ((currentZVal < 10000) && (currentZVal > maxZval))
+                    maxZval = currentZVal;// = 0;
+               // cout<<"maxZval =["<<maxZval<<"]"<<endl;
+                //cout<<"-------------------- currentZVal=["<<currentZVal<<"] x=["<<x<<"], y=["<<y<<"], z=["<<z<<"]---------currentXVal=[ "<<currentXVal<<"] & currentYVal=["<<currentYVal<<"]------------"<<endl;
+                currentXVal = x_vals[x];// lon_rho[dummyCounter];  lon_rho lat_rho
+                currentYVal = y_vals[y];//lat_rho[dummyCounter];
+
+
+
+                if (currentXVal < minXval)
+                    minXval = currentXVal;// = 0;
+
+
+                if (currentXVal > maxXval)
+                    maxXval = currentXVal;// = 0;
+
+
+                if (currentYVal < minYval)
+                    minYval = currentYVal;// = 0;
+
+
+                if (currentYVal > maxYval)
+                    maxYval = currentYVal;// = 0;
+
+
+                points->InsertNextPoint(currentXVal, currentYVal, currentZVal);
+
+                // compute OW and  values here first.....
+
+                double S_n, S_s, w_val,  d_x, d_y, d_u_x, d_u_y, d_v_x, d_v_y ;
+
+                if(x < x_rho - 1)
+                {
+                    //cout<<"test 1"<<endl;
+                    d_u_x = u_vals_Vec[z][y][ x+1]  -  u_vals_Vec[z][y][x] ;
+                   //cout<<"test 1.1 x["<<x<<"], y["<<y<<"]"  <<endl;
+                   // if(y >= y_rho-1)
+                    //    d_v_x = v_vals_Vec[ x+1 ][y-2][z]  -  v_vals_Vec[x][y-2][z];
+                    //else
+                    d_v_x = v_vals_Vec[z][y][x+1 ]  -  v_vals_Vec[z][y][x];
+
+                }
+                else if(x == x_rho-1)
+                {
+                  //cout<<"test 2"<<endl;
+                    d_u_x = u_vals_Vec[z][y][x-1] - u_vals_Vec[z][y][x-2];
+                    //cout<<"test 2.1"<<endl;
+
+                    //if(y >= eta_rho-1)
+                    //    d_v_x = v_vals_Vec[ x-1 ][y-2][z]  -  v_vals_Vec[x-2][y-2][z];
+                    //else
+                    d_v_x = v_vals_Vec[ z][y][x-1]  -  v_vals_Vec[z][y][x-2];
+
+                }
+                else//impossible
+                {
+                    //cout<<"test 3"<<endl;
+                    d_u_x = u_vals_Vec[x-2][y][z] - u_vals_Vec[x-3][y][z];
+                    //cout<<"test 3.1"<<endl;
+                    if(y >= y_rho-1)
+                        d_v_x = v_vals_Vec[ x-1 ][y-2][z]  -  v_vals_Vec[x-2][y-2][z];
+                    else
+                        d_v_x = v_vals_Vec[ x-1 ][y][z]  -  v_vals_Vec[x-2][y][z];
+                }
+
+
+
+                if(y < y_rho - 1)
+                {
+                    //cout<<"test 4"<<endl;
+                    d_v_y = v_vals_Vec[ z ][ y+1 ][ x ] - v_vals_Vec[ z][ y ][ x ];
+                    //cout<<"test 4.1"<<endl;
+
+
+                    //if(x >= x_rho-1)
+                        //d_u_y = u_vals_Vec[ x-2 ][y+1][z]  -  u_vals_Vec[x-2][y][z];
+                    //else
+                    d_u_y = u_vals_Vec[ z][y+1][x]  -  u_vals_Vec[z][y][x];
+
+
+                }
+                else if(y == y_rho - 1)
+                {
+                    //cout<<"test 5"<<endl;
+                    d_v_y = v_vals_Vec[ z ][ y-1 ][ x ] - v_vals_Vec[ z ][ y-2 ][ x ];
+                    //cout<<"test 5.1"<<endl;
+
+
+                    //if(x >= xi_rho-1)
+                        //d_u_y = u_vals_Vec[ x-2 ][y-1][z]  -  u_vals_Vec[x-2][y-2][z];
+                    //else
+                    d_u_y = u_vals_Vec[ z ][y-1][x]  -  u_vals_Vec[z][y-2][x];
+
+                }
+                else//impossible
+                {
+                    //cout<<"test 6"<<endl;
+                    d_v_y = v_vals_Vec[ x ][ y-2 ][ z ] - v_vals_Vec[ x ][ y-3 ][ z ];
+                    //cout<<"test 6.1"<<endl;
+                    if(x >= x_rho-1)
+                        d_u_y = u_vals_Vec[ x-2 ][y-2][z]  -  u_vals_Vec[x-2][y-3][z];
+                    else
+                        d_u_y = u_vals_Vec[ x ][y-2][z]  -  u_vals_Vec[x][y-3][z];
+
+                }
+
+
+
+//               // S_n =  ( d_u_x * pm_Vec[x][y] ) - (d_v_y * pn_Vec[x][y]);//            pm pn?
+//                S_n =  d_u_x* x_vals[x]  - d_v_y* y_vals[y]  ;
+//                //S_s =    (d_v_x * pm_Vec[x][y]) + (d_u_y * pn_Vec[x][y]);                     ?
+//                S_s =  d_v_x* x_vals[x]  + d_u_y*y_vals[y]  ;
+//                //w_val =  (d_v_x * pm_Vec[x][y]) - (d_u_y * pn_Vec[x][y]);                     ?
+//                w_val = d_v_x* x_vals[x]  - d_u_y*y_vals[y] ;
+
+                // S_n =  ( d_u_x * pm_Vec[x][y] ) - (d_v_y * pn_Vec[x][y]);//            pm pn?
+                 S_n =  d_u_x  - d_v_y  ;
+                 //S_s =    (d_v_x * pm_Vec[x][y]) + (d_u_y * pn_Vec[x][y]);                     ?
+                 S_s =  d_v_x  + d_u_y  ;
+                 //w_val =  (d_v_x * pm_Vec[x][y]) - (d_u_y * pn_Vec[x][y]);                     ?
+                 w_val = d_v_x  - d_u_y ;
+
+                OW_vals_Vec[z][y][x] =  ( S_n * S_n ) + ( S_s * S_s ) - ( w_val * w_val );    //?
+
+
+                //----------------------
+
+
+               // tempVals_Vec[x][y][z] = tempVals[omageIndex];
+                //double currentPointVal = tempVals_Vec[x][y][z];
+               double currentPointVal = OW_vals_Vec[z][y][x];
+                int test_test = 0;
+                if(currentPointVal!=0)
+                    test_test = 1;
+                if (currentPointVal > 1e+36)
+                    currentPointVal = 0;
+
+                if (currentPointVal > dummyMax )
+                    dummyMax = currentPointVal;
+                else if (currentPointVal < dummyMin )
+                    dummyMin = currentPointVal;
+
+                float v[numberofComponents];
+                v[0] = (float) currentPointVal;
+                v[1] = u_vals_Vec[z][y][x];
+                v[2] = v_vals_Vec[z][y][x];
+                v[3] = 0;
+                v[4] = salt_vals_Vec[z][y][x];
+                v[5] = temp_vals_Vec[z][y][x];
+                v[6] = 0;
+                v[7] = 0;
+                v[8] = 0;
+
+                //
+                //if numberofComponents>1 then u need to add more values to v here...
+                //
+                vectors->InsertTuple(omageIndex,v);
+//                delete [] v;
+                omageIndex++;
+            }
+
+        }
+
+    }
+    cout<<"Min Z Val=["<<minZval<<"] & Max Z Val=["<<maxZval<<"] "<<    " Min X Val=["<<minXval<<"] & Max X Val=["<<maxXval<<"] "<< " Min Y Val=["<<minYval<<"] & Max Y Val=["<<maxYval<<"] "<< endl;
+    cout<<"Max Data Val=["<<dummyMax<<"] & Min Data Val=["<<dummyMin<<"] "<<endl;
+
+    sgrid->SetPoints(points);
+
+
+
+    if (numberofComponents>3)
+        sgrid->GetPointData()->SetTensors(vectors);
+    else if (3>numberofComponents && numberofComponents>1)
+        sgrid->GetPointData()->SetVectors(vectors);
+    else if (numberofComponents==1)
+        sgrid->GetPointData()->SetScalars(vectors);
+    else
+        cout<<"something is wrong with the numberofComponents. Check it please!"<<endl;
+
+
+//     Write file
+//    vtkSmartPointer<vtkXMLStructuredGridWriter> writer =   vtkSmartPointer<vtkXMLStructuredGridWriter>::New();
+//    writer->SetFileName("outputEnrique.vts");
+//    #if VTK_MAJOR_VERSION <= 5
+//        writer->SetInput(sgrid);
+//    #else
+//        writer->SetInputData(sgrid);
+//    #endif
+//        writer->Write();
+
+
+    returnVal = sgrid;
+    int k = returnVal->GetPointData()->GetNumberOfComponents();
+    memcpy(zLevels, z_vals.get(), sizeof(double)*z_rho);
+//    delete[] x_vals;
+//    delete[] y_vals;
+//    delete[] z_vals;
+    /* //example of a vtk file creating is below ----
+
+     vtkSmartPointer<vtkXMLStructuredGridWriter> writer = vtkSmartPointer<vtkXMLStructuredGridWriter>::New();
+     writer->SetFileName("output.vts");
+     #if VTK_MAJOR_VERSION <= 5
+     writer->SetInput(sgrid);
+     #else
+     writer->SetInputData(sgrid);
+     #endif
+     writer->Write();
+
+
+     cout<<"writing output.vts is done!!!!"<<endl;
+
+     */
+
+    return returnVal;
+}
+
+vtkSmartPointer<vtkDataSet> ReadNcDataFile_Multiframe(float ** Data_out,string FileName,float ** Xcoord, float**Ycoord, float **Zcoord, int x_dim, int y_dim, int z_dim,  double* zLevels,int numberofComponents, unsigned long timeframe)
+{
+
+    //this function first reads a specific netCDF file and creates a (curvilinear) vtkDataSet from the read data.
+    // This file returns the content of the file in the vtkDataSet format.
+
+    string GRID_FILE_NAME;// = "/home/aydogan/Desktop/temp.nc";/////////////?
+
+    static int NDIMS = 4;//?
+    const size_t x_rho = x_dim;
+    const size_t y_rho = y_dim;
+    const size_t z_rho = z_dim;
+    int ocean_time = 1;
+    //double Tcline=0.1;//"S-coordinate surface/bottom layer width - need to change but not known the how to change
+    int retval;
+   // double * Cs_r = new double [z_rho];
+   // double * Cs_w = new double [s_w];  lon_rho
+
+    //double * pm = new double[eta_rho*xi_rho];//?
+    //double * pn = new double[eta_rho*xi_rho];//?
+   // double * h = new double [eta_rho*xi_rho];//?
+    //double * lon_rho = new double [y_rho*x_rho];
+    //double * lat_rho = new double [y_rho*x_rho];
+
+
+
+    shared_ptr<double[]> z_vals(new double [z_rho]);
+    shared_ptr<double[]> y_vals(new double [y_rho]);
+    shared_ptr<double[]> x_vals(new double [x_rho]);
+    //double * ZetaVals   = new double [eta_rho*xi_rho];
+    shared_ptr<double[]> u_vals(new double[x_rho*y_rho*z_rho]);
+    shared_ptr<double[]> v_vals(new double[x_rho*y_rho*z_rho]);
+    shared_ptr<double[]> temp_vals(new double [x_rho*y_rho*z_rho]);
+    shared_ptr<double[]> salt_vals(new double [x_rho*y_rho*z_rho]);
+
+
+
+    //double * ocean_time_Vals = new double [1];
+
+    int ncid;// pres_varid, temp_varid;
+    //int lat_varid, lon_varid, Tcline_varid, h_varid, Cs_r_varid, Cs_w_varid, u_Vals_varid, v_Vals_varid;
+    int z_varid, y_varid, x_varid, u_varid, v_varid, temp_varid, salt_varid;
+    //int ocean_time__varid, pm_varid, pn_varid ;
+    size_t start[NDIMS], count[NDIMS];
+    size_t dataStart[] = {timeframe,0,0,0};
+    size_t dataCount[] = {1,z_rho,y_rho,x_rho};
+    double hc;
+
+    ///-------read grid file first ----------
+   // if ((retval = nc_open(GRID_FILE_NAME.c_str(), NC_NOWRITE, &ncid)))
+     //   cout<<"couldnt open the file :[ "<<GRID_FILE_NAME.c_str()<<" ---- !!!"<<endl;
+
+
+
+   // int status = nc_close(ncid);       /* close netCDF dataset */
+    //if (status != NC_NOERR) cout<<"couldnt open 5 the file :[ "<<GRID_FILE_NAME.c_str()<<" ---- !!!"<<endl;
+
+
+
+
+   // hc= Tcline;
+
+    ///-------read the data file now ----------
+
+    if ((retval = nc_open(FileName.c_str(), NC_NOWRITE, &ncid)))
+        cout<<"couldnt open the file :[ "<<GRID_FILE_NAME.c_str()<<" ---- !!!"<<endl;
+
+    if ((retval = nc_inq_varid(ncid, "Z_MIT40", &z_varid)))
+        cout<<"couldnt open 1 the file :[ "<<GRID_FILE_NAME.c_str()<<" ---- !!!"<<endl;
+    if ((retval = nc_inq_varid(ncid, "YC", &y_varid)))
+        cout<<"couldnt open 2 the file :[ "<<GRID_FILE_NAME.c_str()<<" ---- !!!"<<endl;
+    if ((retval = nc_inq_varid(ncid, "XC", &x_varid)))
+        cout<<"couldnt open 2.1 the file :[ "<<GRID_FILE_NAME.c_str()<<" ---- !!!"<<endl;
+    if ((retval = nc_inq_varid(ncid, "TEMP", &temp_varid)))
+        cout<<"couldnt open 2.2 the file :[ "<<GRID_FILE_NAME.c_str()<<" ---- !!!"<<endl;
+    if ((retval = nc_inq_varid(ncid, "SALT", &salt_varid)))
+        cout<<"couldnt open 2.2 the file :[ "<<GRID_FILE_NAME.c_str()<<" ---- !!!"<<endl;
+    if ((retval = nc_inq_varid(ncid, "U", &u_varid)))
+        cout<<"couldnt open 2.3 the file :[ "<<GRID_FILE_NAME.c_str()<<" ---- !!!"<<endl;
+    if ((retval = nc_inq_varid(ncid, "V", &v_varid)))
+        cout<<"couldnt open 2.3.1 the file :[ "<<GRID_FILE_NAME.c_str()<<" ---- !!!"<<endl;
+
+    /* Read the coordinate variable data. */
+
+    if ((retval = nc_get_var_double(ncid, z_varid,z_vals.get())))
+        cout<<"couldnt open 3 the file :[ "<<GRID_FILE_NAME.c_str()<<" ---- !!!"<<endl;
+    if ((retval = nc_get_var_double(ncid, y_varid, y_vals.get())))
+        cout<<"couldnt open 3 the file :[ "<<GRID_FILE_NAME.c_str()<<" ---- !!!"<<endl;
+    if ((retval = nc_get_var_double(ncid, x_varid, x_vals.get())))
+        cout<<"couldnt open 3 the file :[ "<<GRID_FILE_NAME.c_str()<<" ---- !!!"<<endl;
+    if ( (retval = nc_get_vara_double(ncid, temp_varid, dataStart,dataCount,temp_vals.get())))
+        cout<<"couldnt open 4 the file :[ "<<GRID_FILE_NAME.c_str()<<" ---- !!!"<<endl;
+    if ( (retval = nc_get_vara_double(ncid, salt_varid, dataStart,dataCount,salt_vals.get())))
+        cout<<"couldnt open 4 the file :[ "<<GRID_FILE_NAME.c_str()<<" ---- !!!"<<endl;
+    if ((retval = nc_get_vara_double(ncid, u_varid, dataStart,dataCount,u_vals.get())))
+        cout<<"couldnt open 4.2 the file :[ "<<GRID_FILE_NAME.c_str()<<" ---- !!!"<<endl;
+    if ((retval = nc_get_vara_double(ncid, v_varid, dataStart,dataCount,v_vals.get())))
+        cout<<"couldnt open 4.3 the file :[ "<<GRID_FILE_NAME.c_str()<<" ---- !!!"<<endl;
+
+    count[0] = 1;
+    count[1] = z_rho;
+    count[2] = y_rho;
+    count[3] = x_rho;
+    start[1] = 0;
+    start[2] = 0;
+    start[3] = 0;
+    start[0] = 0;
+    static size_t start1[] = {0, 0, 0}; /* start at first value */
+    static size_t count1[] = {1, (size_t)y_rho, (size_t)x_rho};
+
+
+
+    // cout<<"--------------------- Test 100 --------------------------"<<endl;
+    // // cout<<"pres_varid=["<<pres_varid<<"]"<<endl;
+    // if ((retval = nc_inq_varid(ncid, "temp", &pres_varid)))
+    //     cout<<"couldnt open 9 the file :[ "<<FileName.c_str()<<" ---- !!!"<<endl;
+
+    // if ((retval = nc_get_vara_double(ncid, pres_varid, start, count, tempVals)))
+    //     cout<<"couldnt open 9.1 the file :[ "<<FileName.c_str()<<" ---- !!!"<<endl;
+
+    // if ((retval = nc_inq_varid(ncid, "zeta", &lon_varid)))
+    //     cout<<"couldnt open 9.5 the file :[ "<<FileName.c_str()<<" ---- !!!"<<endl;
+
+    // if ((retval = nc_get_vara_double(ncid, lon_varid, start1, count1, ZetaVals)))
+    //     cout<<"couldnt open 9.7 the file :[ "<<FileName.c_str()<<" ---- !!!"<<endl;
+    // cout<<"--------------------- Test 101 --------------------------"<<endl;
+    int status;
+    status = nc_close(ncid);
+    if (status != NC_NOERR) cout<<"couldnt open 10 the file :[ "<<FileName.c_str()<<" ---- !!!"<<endl;
+
+    /* close netCDF dataset */
+
+
+    vector<vector<vector<double> > > OW_vals_Vec;
+    vector<vector<vector<double> > > u_vals_Vec;
+    vector<vector<vector<double> > > v_vals_Vec;
+    //vector<vector<double> > ZetaVals_Vec;
+    //vector<vector<double> > hVals_Vec;
+    //vector<vector<double> > lat_rho_Vec;
+    //vector<vector<double> > lon_rho_Vec;
+    //vector<vector<double> > pm_Vec;
+    //vector<vector<double> > pn_Vec;
+    //vector <double> Cs_r_Vec;
+    //vector <double> S_rho_Vec;
+    vector<vector<vector<double> > > temp_vals_Vec;
+    vector<vector<vector<double> > > salt_vals_Vec;
+
+
+
+    /*
+    S_rho_Vec.resize(s_r);
+    Cs_r_Vec.resize(s_r);
+
+    lat_rho_Vec.resize(xi_rho);  //  xi_rho = 722
+    for (int i = 0; i < xi_rho; ++i)
+    {
+        lat_rho_Vec[i].resize(eta_rho);// eta_rho = 362
+
+    }
+
+
+    lon_rho_Vec.resize(xi_rho);  //  xi_rho = 722
+    for (int i = 0; i < xi_rho; ++i)
+    {
+        lon_rho_Vec[i].resize(eta_rho);// eta_rho = 362
+
+    }
+
+
+    pm_Vec.resize(xi_rho);  //  xi_rho = 722
+    for (int i = 0; i < xi_rho; ++i)
+    {
+        pm_Vec[i].resize(eta_rho);// eta_rho = 362
+
+    }*/
+
+
+
+    temp_vals_Vec.resize(z_rho);
+    for (int i = 0; i < z_rho; ++i)
+    {
+        temp_vals_Vec[i].resize(y_rho);
+
+        for (int j = 0; j < y_rho; ++j)
+            temp_vals_Vec[i][j].resize(x_rho);
+    }
+
+    salt_vals_Vec.resize(z_rho);
+    for (int i = 0; i < z_rho; ++i)
+    {
+        salt_vals_Vec[i].resize(y_rho);
+
+        for (int j = 0; j < y_rho; ++j)
+            salt_vals_Vec[i][j].resize(x_rho);
+    }
+
+    /*
+    pn_Vec.resize(xi_rho);
+    for (int i = 0; i < xi_rho; ++i)
+    {
+        pn_Vec[i].resize(eta_rho);
+
+    }
+    */
+    OW_vals_Vec.resize(z_rho);
+    for (int i = 0; i < z_rho; ++i)
+    {
+        OW_vals_Vec[i].resize(y_rho);
+
+        for (int j = 0; j < y_rho; ++j)
+            OW_vals_Vec[i][j].resize(x_rho);
+    }
+
+    u_vals_Vec.resize(z_rho);
+    for (int i = 0; i < z_rho; ++i)
+    {
+        u_vals_Vec[i].resize(y_rho);
+
+        for (int j = 0; j < y_rho; ++j)
+            u_vals_Vec[i][j].resize(x_rho);
+    }
+
+
+
+    v_vals_Vec.resize(z_rho);
+    for (int i = 0; i < z_rho; ++i)
+    {
+        v_vals_Vec[i].resize(y_rho);
+
+        for (int j = 0; j < y_rho; ++j)
+            v_vals_Vec[i][j].resize(x_rho);
+    }
+
+    /*
+    hVals_Vec.resize(xi_rho);
+    for (int i = 0; i < xi_rho; ++i)
+    {
+        hVals_Vec[i].resize(eta_rho);
+    }
+
+
+    ZetaVals_Vec.resize(xi_rho);
+    for (int i = 0; i < xi_rho; ++i)
+    {
+        ZetaVals_Vec[i].resize(eta_rho);
+    }
+    */
+
+    cout<<"--------------------- Test 1 .0 --------------------------"<<endl;
+
+
+    long dummyCounter = 0;
+
+   /*for(long y=0; y < z_rho ; y++)
+    {
+        z_rho_Vec[y] = z_vals[y];
+        //cout<<"S_rho_Vec["<<y<<"]=["<<S_rho_Vec[y]<<"]"<<endl;
+
+    }
+
+    /*
+    for(long y=0; y < s_r ; y++)
+    {
+        Cs_r_Vec[y] = Cs_r[y];
+        //cout<<"Cs_r_Vec["<<y<<"]=["<<Cs_r_Vec[y]<<"]"<<endl;
+
+    }
+    */
+
+    dummyCounter = 0;
+
+    for(long z=0; z < z_rho ; z++)
+    {
+
+        for(long y=0; y < y_rho ; y++)
+        {
+            for(long x=0; x < x_rho ; x++)
+            {
+
+                temp_vals_Vec[z][y][x]= temp_vals[dummyCounter];
+                dummyCounter++;
+            }
+        }
+    }
+
+    dummyCounter = 0;
+
+    for(long z=0; z < z_rho ; z++)
+    {
+
+        for(long y=0; y < y_rho ; y++)
+        {
+            for(long x=0; x < x_rho ; x++)
+            {
+
+                salt_vals_Vec[z][y][x]= salt_vals[dummyCounter];
+                dummyCounter++;
+            }
+        }
+    }
+
+
+    dummyCounter = 0;
+    for (long z=0; z < z_rho ; z++)
+    {
+
+        for(long y=0; y < y_rho ; y++)
+        {
+            for(long x=0; x < x_rho ; x++)
+            {
+                if (u_vals[dummyCounter]< 100000000)
+                    u_vals_Vec[z][y][x]= u_vals[dummyCounter];
+                else
+                    u_vals_Vec[z][y][x]= 0;
+                dummyCounter++;
+            }
+        }
+    }
+
+
+    dummyCounter = 0;
+    for(long z=0; z < z_rho ; z++)
+    {
+
+        for(long y=0; y < y_rho; y++)
+        {
+            for(long x=0; x < x_rho ; x++)
+            {
+                if (v_vals[dummyCounter]< 100000000)
+                    v_vals_Vec[z][y][x]= v_vals[dummyCounter];
+                else
+                    v_vals_Vec[z][y][x]= 0;
+                dummyCounter++;
+            }
+        }
+    }
+
+
+
+    /*
+    dummyCounter = 0;
+    for(long y=0; y < y_rho; y++)
+    {
+        for(long x=0; x < x_rho ; x++)
+        {
+
+            hVals_Vec[x][y]= h[dummyCounter];
+            dummyCounter++;
+            //cout<<"hVals_Vec["<<x<<"]["<<y<<"]=["<<hVals_Vec[x][y] <<"]"<<endl;
+        }
+    }
+
+    dummyCounter = 0;
+    for(long y=0; y < eta_rho; y++)
+    {
+        for(long x=0; x < xi_rho ; x++)
+        {
+            if (pm[dummyCounter]< 100000000)
+                pm_Vec[x][y]= pm[dummyCounter];
+            else
+                pm_Vec[x][y]= 0;
+            dummyCounter++;
+        }
+    }
+
+
+    dummyCounter = 0;
+    for(long y=0; y < eta_rho; y++)
+    {
+        for(long x=0; x < xi_rho ; x++)
+        {
+            if (pn[dummyCounter]< 100000000)
+                pn_Vec[x][y]= pn[dummyCounter];
+            else
+                pn_Vec[x][y]= 0;
+            dummyCounter++;
+        }
+    }
+    */
+
+
+    cout<<"--------------------- Test 1 .01 --------------------------"<<endl;
+
+
+    cout<<"--------------------- Test 1 --------------------------"<<endl;
+
+
+//    delete[] u_vals;
+//    delete[] v_vals;
+   // delete[] h;
+    //delete[] pm;
+   // delete[] pn;
+   // delete[] s_rVals;
+    //delete[] Cs_r;
+//    delete[] temp_vals;
+//    delete[] salt_vals;
+
+    //----read z_r now-----
+
+    cout<<"--------------------- Test 2 --------------------------"<<endl;
+
+    /*
+    dummyCounter = 0;
+    for(long y=0; y < eta_rho; y++)
+    {
+        for(long x=0; x < xi_rho ; x++)
+        {
+            if (ZetaVals[dummyCounter] < 100000)
+                ZetaVals_Vec[x][y]= ZetaVals[dummyCounter];
+            else
+                ZetaVals_Vec[x][y]= 0;
+
+           // cout<<"ZetaVals_Vec["<<x<<"]["<<y<<"]=["<<ZetaVals_Vec[x][y] <<"]"<<endl;
+
+            dummyCounter++;
+        }
+    }
+
+    delete[] ZetaVals;
+
+
+    dummyCounter = 0;
+
+    for(long y=0; y < eta_rho; y++)
+    {
+        for(long x=0; x < xi_rho ; x++)
+        {
+
+            lat_rho_Vec[x][y]= lat_rho[dummyCounter];
+            dummyCounter++;
+
+        }
+    }
+
+
+    delete[] lat_rho;
+
+
+    dummyCounter = 0;
+    for(long y=0; y < eta_rho; y++)
+    {
+        for(long x=0; x < xi_rho ; x++)
+        {
+
+            lon_rho_Vec[x][y]= lon_rho[dummyCounter];
+            dummyCounter++;
+        }
+    }
+
+
+    delete[] lon_rho;
+    */
+
+    cout<<"--------------------- Test 3 --------------------------"<<endl;
+
+    static int dims[3] = { x_dim, y_dim, z_dim };
+    vtkSmartPointer<vtkDataSet> returnVal;
+    vtkNew<vtkStructuredGrid> sgrid;
+    sgrid->SetDimensions( dims );
+
+    vtkNew<vtkFloatArray> vectors;
+    vectors->SetNumberOfComponents(numberofComponents);
+    vectors->SetNumberOfTuples( dims[0] * dims[1] * dims[2] );
+
+    vtkNew<vtkPoints> points;
+    points->Allocate( dims[0] * dims[1] * dims[2] );
+
+    double dummyMax = 0;
+    double dummyMin = 1e+37;
+    double currentXVal, currentYVal, currentZVal,z_o;
+    //double currentZ_rho, currentCs_r;
+
+    cout<<"--------------------- Test 4 --------------------------"<<endl;
+    cout<<"Before the loop!"<<endl;
+    long omageIndex = 0;
+    double maxZval=-10;
+    double minZval=1000000;
+
+
+    double maxYval=-1000;
+    double minYval=1000000;
+
+
+    double maxXval=-1000;
+    double minXval=100000;
+    for(long z=0; z < z_rho ; z++)
+    {
+        //long dummyCounter = 0;
+        for(long y=0; y < y_rho ; y++)
+        {
+            for(long x=0; x < x_rho ; x++)
+            {
+               // cout<<"--------------------- inside loop ["<< omageIndex << "] -------------1-------------"<<endl;
+                //    compute z and  values here first.....
+                //currentZ_rho = Z_rho_Vec [z];
+               // currentCs_r = Cs_r_Vec[z];
+
+                //z_o = (hc * currentS_rho ) + ( h[dummyCounter] * currentCs_r );
+                //z_o = z_o / (h[dummyCounter]+hc);
+                //z_o = (hc * currentZ_rho ) + ( hVals_Vec[x][y] * currentCs_r );
+                //z_o = z_o / (hVals_Vec[x][y]+hc);///////////?
+
+
+                //z_r [omageIndex] = ZetaVals[dummyCounter] +  (ZetaVals[dummyCounter] + h[dummyCounter]) * z_o;
+                //currentZVal = ZetaVals[dummyCounter] +  (ZetaVals[dummyCounter] + h[dummyCounter]) * z_o;
+                //currentZVal = ZetaVals_Vec[x][y] +  (ZetaVals_Vec[x][y] + hVals_Vec[x][y]) * z_o;
+                currentZVal = z_vals[z];
+                //cout<<"currentS_rho=["<<currentS_rho <<"], currentCs_r=["<<currentCs_r  <<"], hVals_Vec["<<x<<"]["<<y<<"]=["  <<hVals_Vec[x][y]  <<"],  ZetaVals_Vec["<<x<<"]["<<y<<"]=["  << ZetaVals_Vec[x][y] <<"]-----"<<endl;
+                if (currentZVal >100000)
+                    currentZVal = 10;
+
+                if (currentZVal < minZval)
+                    minZval = currentZVal;// = 0;
+
+
+                if ((currentZVal < 10000) && (currentZVal > maxZval))
+                    maxZval = currentZVal;// = 0;
+               // cout<<"maxZval =["<<maxZval<<"]"<<endl;
+                //cout<<"-------------------- currentZVal=["<<currentZVal<<"] x=["<<x<<"], y=["<<y<<"], z=["<<z<<"]---------currentXVal=[ "<<currentXVal<<"] & currentYVal=["<<currentYVal<<"]------------"<<endl;
+                currentXVal = x_vals[x];// lon_rho[dummyCounter];  lon_rho lat_rho
+                currentYVal = y_vals[y];//lat_rho[dummyCounter];
+
+
+
+                if (currentXVal < minXval)
+                    minXval = currentXVal;// = 0;
+
+
+                if (currentXVal > maxXval)
+                    maxXval = currentXVal;// = 0;
+
+
+                if (currentYVal < minYval)
+                    minYval = currentYVal;// = 0;
+
+
+                if (currentYVal > maxYval)
+                    maxYval = currentYVal;// = 0;
+
+
+                points->InsertNextPoint(currentXVal, currentYVal, currentZVal);
+
+                // compute OW and  values here first.....
+
+                double S_n, S_s, w_val,  d_x, d_y, d_u_x, d_u_y, d_v_x, d_v_y ;
+
+                if(x < x_rho - 1)
+                {
+                    //cout<<"test 1"<<endl;
+                    d_u_x = u_vals_Vec[z][y][ x+1]  -  u_vals_Vec[z][y][x] ;
+                   //cout<<"test 1.1 x["<<x<<"], y["<<y<<"]"  <<endl;
+                   // if(y >= y_rho-1)
+                    //    d_v_x = v_vals_Vec[ x+1 ][y-2][z]  -  v_vals_Vec[x][y-2][z];
+                    //else
+                    d_v_x = v_vals_Vec[z][y][x+1 ]  -  v_vals_Vec[z][y][x];
+
+                }
+                else if(x == x_rho-1)
+                {
+                  //cout<<"test 2"<<endl;
+                    d_u_x = u_vals_Vec[z][y][x-1] - u_vals_Vec[z][y][x-2];
+                    //cout<<"test 2.1"<<endl;
+
+                    //if(y >= eta_rho-1)
+                    //    d_v_x = v_vals_Vec[ x-1 ][y-2][z]  -  v_vals_Vec[x-2][y-2][z];
+                    //else
+                    d_v_x = v_vals_Vec[ z][y][x-1]  -  v_vals_Vec[z][y][x-2];
+
+                }
+                else//impossible
+                {
+                    //cout<<"test 3"<<endl;
+                    d_u_x = u_vals_Vec[x-2][y][z] - u_vals_Vec[x-3][y][z];
+                    //cout<<"test 3.1"<<endl;
+                    if(y >= y_rho-1)
+                        d_v_x = v_vals_Vec[ x-1 ][y-2][z]  -  v_vals_Vec[x-2][y-2][z];
+                    else
+                        d_v_x = v_vals_Vec[ x-1 ][y][z]  -  v_vals_Vec[x-2][y][z];
+                }
+
+
+
+                if(y < y_rho - 1)
+                {
+                    //cout<<"test 4"<<endl;
+                    d_v_y = v_vals_Vec[ z ][ y+1 ][ x ] - v_vals_Vec[ z][ y ][ x ];
+                    //cout<<"test 4.1"<<endl;
+
+
+                    //if(x >= x_rho-1)
+                        //d_u_y = u_vals_Vec[ x-2 ][y+1][z]  -  u_vals_Vec[x-2][y][z];
+                    //else
+                    d_u_y = u_vals_Vec[ z][y+1][x]  -  u_vals_Vec[z][y][x];
+
+
+                }
+                else if(y == y_rho - 1)
+                {
+                    //cout<<"test 5"<<endl;
+                    d_v_y = v_vals_Vec[ z ][ y-1 ][ x ] - v_vals_Vec[ z ][ y-2 ][ x ];
+                    //cout<<"test 5.1"<<endl;
+
+
+                    //if(x >= xi_rho-1)
+                        //d_u_y = u_vals_Vec[ x-2 ][y-1][z]  -  u_vals_Vec[x-2][y-2][z];
+                    //else
+                    d_u_y = u_vals_Vec[ z ][y-1][x]  -  u_vals_Vec[z][y-2][x];
+
+                }
+                else//impossible
+                {
+                    //cout<<"test 6"<<endl;
+                    d_v_y = v_vals_Vec[ x ][ y-2 ][ z ] - v_vals_Vec[ x ][ y-3 ][ z ];
+                    //cout<<"test 6.1"<<endl;
+                    if(x >= x_rho-1)
+                        d_u_y = u_vals_Vec[ x-2 ][y-2][z]  -  u_vals_Vec[x-2][y-3][z];
+                    else
+                        d_u_y = u_vals_Vec[ x ][y-2][z]  -  u_vals_Vec[x][y-3][z];
+
+                }
+
+
+
+//               // S_n =  ( d_u_x * pm_Vec[x][y] ) - (d_v_y * pn_Vec[x][y]);//            pm pn?
+//                S_n =  d_u_x* x_vals[x]  - d_v_y* y_vals[y]  ;
+//                //S_s =    (d_v_x * pm_Vec[x][y]) + (d_u_y * pn_Vec[x][y]);                     ?
+//                S_s =  d_v_x* x_vals[x]  + d_u_y*y_vals[y]  ;
+//                //w_val =  (d_v_x * pm_Vec[x][y]) - (d_u_y * pn_Vec[x][y]);                     ?
+//                w_val = d_v_x* x_vals[x]  - d_u_y*y_vals[y] ;
+
+                // S_n =  ( d_u_x * pm_Vec[x][y] ) - (d_v_y * pn_Vec[x][y]);//            pm pn?
+                 S_n =  d_u_x  - d_v_y  ;
+                 //S_s =    (d_v_x * pm_Vec[x][y]) + (d_u_y * pn_Vec[x][y]);                     ?
+                 S_s =  d_v_x  + d_u_y  ;
+                 //w_val =  (d_v_x * pm_Vec[x][y]) - (d_u_y * pn_Vec[x][y]);                     ?
+                 w_val = d_v_x  - d_u_y ;
+
+                OW_vals_Vec[z][y][x] =  ( S_n * S_n ) + ( S_s * S_s ) - ( w_val * w_val );    //?
+
+
+                //----------------------
+
+
+               // tempVals_Vec[x][y][z] = tempVals[omageIndex];
+                //double currentPointVal = tempVals_Vec[x][y][z];
+               double currentPointVal = OW_vals_Vec[z][y][x];
+                int test_test = 0;
+                if(currentPointVal!=0)
+                    test_test = 1;
+                if (currentPointVal > 1e+36)
+                    currentPointVal = 0;
+
+                if (currentPointVal > dummyMax )
+                    dummyMax = currentPointVal;
+                else if (currentPointVal < dummyMin )
+                    dummyMin = currentPointVal;
+
+                float v[numberofComponents];
+                v[0] = (float) currentPointVal;
+                v[1] = u_vals_Vec[z][y][x];
+                v[2] = v_vals_Vec[z][y][x];
+                v[3] = w_val * w_val ;
+                v[4] = salt_vals_Vec[z][y][x];
+                v[5] = temp_vals_Vec[z][y][x];
+                v[6] = 0;
+                v[7] = 0;
+                v[8] = 0;
+
+                //
+                //if numberofComponents>1 then u need to add more values to v here...
+                //
+                vectors->InsertTuple(omageIndex,v);
+//                delete [] v;
+                omageIndex++;
+            }
+
+        }
+
+    }
+    cout<<"Min Z Val=["<<minZval<<"] & Max Z Val=["<<maxZval<<"] "<<    " Min X Val=["<<minXval<<"] & Max X Val=["<<maxXval<<"] "<< " Min Y Val=["<<minYval<<"] & Max Y Val=["<<maxYval<<"] "<< endl;
+    cout<<"Max Data Val=["<<dummyMax<<"] & Min Data Val=["<<dummyMin<<"] "<<endl;
+
+    sgrid->SetPoints(points);
+
+
+
+    if (numberofComponents>3)
+        sgrid->GetPointData()->SetTensors(vectors);
+    else if (3>numberofComponents && numberofComponents>1)
+        sgrid->GetPointData()->SetVectors(vectors);
+    else if (numberofComponents==1)
+        sgrid->GetPointData()->SetScalars(vectors);
+    else
+        cout<<"something is wrong with the numberofComponents. Check it please!"<<endl;
+
+
+//     Write file
+//    vtkSmartPointer<vtkXMLStructuredGridWriter> writer =   vtkSmartPointer<vtkXMLStructuredGridWriter>::New();
+//    writer->SetFileName("outputEnrique.vts");
+//    #if VTK_MAJOR_VERSION <= 5
+//        writer->SetInput(sgrid);
+//    #else
+//        writer->SetInputData(sgrid);
+//    #endif
+//        writer->Write();
+
+
+    returnVal = sgrid;
+    int k = returnVal->GetPointData()->GetNumberOfComponents();
+    memcpy(zLevels, z_vals.get(), sizeof(double)*z_rho);
+//    delete[] x_vals;
+//    delete[] y_vals;
+//    delete[] z_vals;
+    /* //example of a vtk file creating is below ----
+
+     vtkSmartPointer<vtkXMLStructuredGridWriter> writer = vtkSmartPointer<vtkXMLStructuredGridWriter>::New();
+     writer->SetFileName("output.vts");
+     #if VTK_MAJOR_VERSION <= 5
+     writer->SetInput(sgrid);
+     #else
+     writer->SetInputData(sgrid);
+     #endif
+     writer->Write();
+
+
+     cout<<"writing output.vts is done!!!!"<<endl;
+
+     */
+
+    return returnVal;
+}
+
+
 
 vtkDataSet * ReadNcDataFile_optical(float ** Data_out,string FileName,float ** Xcoord, float**Ycoord, float **Zcoord, int x_dim, int y_dim, int z_dim, int numberofComponents)
 {
@@ -1913,11 +3447,11 @@ vtkDataSet * ReadNcDataFile_optical(float ** Data_out,string FileName,float ** X
     vtkStructuredGrid *sgrid = vtkStructuredGrid::New();
     sgrid->SetDimensions( dims );
 
-    vtkFloatArray *vectors = vtkFloatArray::New();
+    vtkNew<vtkFloatArray> vectors;
     vectors->SetNumberOfComponents(numberofComponents);
     vectors->SetNumberOfTuples( dims[0] * dims[1] * dims[2] );
 
-    vtkPoints *points = vtkPoints::New();
+    vtkNew<vtkPoints>points;
     points->Allocate( dims[0] * dims[1] * dims[2] );
 
     double dummyMax = 0;
@@ -2030,9 +3564,12 @@ vtkDataSet * ReadNcDataFile_optical(float ** Data_out,string FileName,float ** X
     cout<<"Min Z Val=["<<minZval<<"] & Max Z Val=["<<maxZval<<"] "<<    " Min X Val=["<<minXval<<"] & Max X Val=["<<maxXval<<"] "<< " Min Y Val=["<<minYval<<"] & Max Y Val=["<<maxYval<<"] "<< endl;
     cout<<"Max Data Val=["<<dummyMax<<"] & Min Data Val=["<<dummyMin<<"] "<<endl;
 
+
+    cout<<"SetPoints"<<endl;
+
     sgrid->SetPoints(points);
 
-
+    cout<<"SetData"<<endl;
     points->Delete();
     if (numberofComponents>1)
         sgrid->GetPointData()->SetVectors(vectors);
@@ -2041,17 +3578,17 @@ vtkDataSet * ReadNcDataFile_optical(float ** Data_out,string FileName,float ** X
     else
         cout<<"something is wrong with the numberofComponents. Check it please!"<<endl;
     vectors->Delete();
-
+    cout<<"Finish"<<endl;
 
     // Write file
-    vtkSmartPointer<vtkXMLStructuredGridWriter> writer =   vtkSmartPointer<vtkXMLStructuredGridWriter>::New();
-    writer->SetFileName("outputEnrique.vts");
-    #if VTK_MAJOR_VERSION <= 5
-        writer->SetInput(sgrid);
-    #else
-        writer->SetInputData(sgrid);
-    #endif
-        writer->Write();
+//    vtkSmartPointer<vtkXMLStructuredGridWriter> writer =   vtkSmartPointer<vtkXMLStructuredGridWriter>::New();
+//    writer->SetFileName("outputEnrique.vts");
+//    #if VTK_MAJOR_VERSION <= 5
+//        writer->SetInput(sgrid);
+//    #else
+//        writer->SetInputData(sgrid);
+//    #endif
+//        writer->Write();
 
 
     returnVal = sgrid;
@@ -2074,6 +3611,560 @@ vtkDataSet * ReadNcDataFile_optical(float ** Data_out,string FileName,float ** X
 
     return returnVal;
 }
+
+bool ReadNcData_SSH_SingleFrame(vector<pair<cv::Point2d,double>>& eta_centorid, string FileName, int x_dim, int y_dim,const string OutputOcdfile)
+{
+
+    FILE *fpoutETAMax;
+    char OutOcd_etaMax[256];
+    FILE *fpoutETAMin;
+    char OutOcd_etaMin[256];
+
+    string Output_eta = OutputOcdfile;
+    Output_eta = Output_eta.substr(0, Output_eta.rfind("."));
+    String Output_etaMax = Output_eta + "_EtaCenterMax.uocd";
+    strcpy(OutOcd_etaMax,Output_etaMax.c_str());
+    fpoutETAMax = fopen(OutOcd_etaMax, "w");
+    String Output_etaMin = Output_eta + "_EtaCenterMin.uocd";
+    strcpy(OutOcd_etaMin,Output_etaMin.c_str());
+    fpoutETAMin = fopen(OutOcd_etaMin, "w");
+
+
+    static int NDIMS = 4;//?
+    int x_rho = 500;
+    int y_rho = 500;
+    int z_rho = 50;
+    int ocean_time = 1;
+    int retval;
+    double *ETA_vals = new double[x_rho*y_rho*1];
+    int ETA_varid;
+    int ncid;
+
+    if ((retval = nc_open(FileName.c_str(), NC_NOWRITE, &ncid)))
+        cout<<"couldnt open the file :[ "<<FileName.c_str()<<" ---- !!!"<<endl;
+
+
+    if ((retval = nc_inq_varid(ncid, "ETA", &ETA_varid))){
+        cout<<"No ETA Data"<<endl;
+        return 1;
+    }
+
+    if ((retval = nc_get_var_double(ncid, ETA_varid, ETA_vals)))
+        cout<<"couldnt open 4.3 the file :[ "<<FileName.c_str()<<" ---- !!!"<<endl;
+
+    Mat input = Mat(x_dim, y_dim, CV_64FC1,ETA_vals,cv::Mat::AUTO_STEP);
+//    std::memcpy(input.data, ETA_vals,x_dim*y_dim*sizeof(double));
+
+//    Mat dilate_result2 = Mat::zeros(cv::Size(input.rows,input.cols),CV_8U);
+//    Mat erode_result2 = Mat::zeros(cv::Size(input.rows,input.cols),CV_8U);
+//    Mat eta_Peaks = Mat::zeros(cv::Size(input.rows,input.cols),CV_8U);
+    Mat input_dilate;
+    Mat input_erode;
+    Mat dilate_result;
+    Mat erode_result;
+//    cv::GaussianBlur(input,input,cv::Size(3,3),0.5);
+
+
+    //Re
+    Mat morph_kernal = getStructuringElement(MORPH_RECT, Size(7,7));
+    Mat morph_kernal2 = getStructuringElement(MORPH_RECT, Size(3,3));
+    cv::dilate(input,input_dilate,morph_kernal);
+    cv::erode(input,input_erode,morph_kernal);
+
+    cv::compare(input,input_dilate,dilate_result,CMP_EQ);
+    cv::compare(input,input_erode,erode_result,CMP_EQ);
+    morphologyEx(dilate_result, dilate_result, cv::MORPH_CLOSE,morph_kernal2);
+    morphologyEx(erode_result, erode_result, cv::MORPH_CLOSE,morph_kernal2);
+    vector<vector<cv::Point>> dilate_contours;
+    vector<vector<cv::Point>> erode_contours;
+    cv::findContours(dilate_result,dilate_contours,cv::RETR_LIST,cv::CHAIN_APPROX_NONE);
+    cv::findContours(erode_result,erode_contours,cv::RETR_LIST,cv::CHAIN_APPROX_NONE);
+    vector<vector<cv::Point>>::iterator iter_contour = erode_contours.begin();
+    while(iter_contour != erode_contours.end()){
+        if((*iter_contour).size()>100)
+            iter_contour = erode_contours.erase(iter_contour);
+        else{
+            if((*iter_contour).size()>2){
+                cv::Moments eta_moment = cv::moments(cv::Mat(*iter_contour));
+                cv::Point centerPoint = cv::Point(eta_moment.m10/eta_moment.m00, eta_moment.m01/eta_moment.m00);
+
+                if(centerPoint.x<0){
+                    int contourSizeCounter = 0;
+                    int xSum = 0;
+                    int ySum = 0;
+                    vector<cv::Point> isolateContour = (*iter_contour);
+                    while(contourSizeCounter<isolateContour.size()){
+                        xSum+=isolateContour.at(contourSizeCounter).x;
+                        ySum+=isolateContour.at(contourSizeCounter).y;
+                        contourSizeCounter++;
+                    }
+                    centerPoint.x = xSum/contourSizeCounter;
+                    centerPoint.y = ySum/contourSizeCounter;
+                }
+                iter_contour = erode_contours.erase(iter_contour);
+
+                vector<cv::Point> temp_point;
+                temp_point.push_back(centerPoint);
+                erode_contours.push_back(temp_point);
+            }
+            else if ((*iter_contour).size()>1) {
+                vector<cv::Point> temp_point;
+                temp_point.push_back((*iter_contour)[0]);
+                iter_contour = erode_contours.erase(iter_contour);
+                erode_contours.push_back(temp_point);
+            }
+            else
+                iter_contour++;
+        }
+    }
+
+    iter_contour = dilate_contours.begin();
+    while(iter_contour != dilate_contours.end()){
+        if((*iter_contour).size()>100)
+            iter_contour = dilate_contours.erase(iter_contour);
+        else{
+            if((*iter_contour).size()>2){
+                cv::Moments eta_moment = cv::moments(cv::Mat(*iter_contour));
+                cv::Point centerPoint = cv::Point(eta_moment.m10/eta_moment.m00, eta_moment.m01/eta_moment.m00);
+                if(centerPoint.x<0){
+                    int contourSizeCounter = 0;
+                    int xSum = 0;
+                    int ySum = 0;
+                    vector<cv::Point> isolateContour = (*iter_contour);
+                    while(contourSizeCounter<isolateContour.size()){
+                        xSum+=isolateContour.at(contourSizeCounter).x;
+                        ySum+=isolateContour.at(contourSizeCounter).y;
+                        contourSizeCounter++;
+                    }
+                    centerPoint.x = xSum/contourSizeCounter;
+                    centerPoint.y = ySum/contourSizeCounter;
+                }
+                iter_contour = dilate_contours.erase(iter_contour);
+                vector<cv::Point> temp_point;
+                temp_point.push_back(centerPoint);
+                dilate_contours.push_back(temp_point);
+            }
+
+            else if ((*iter_contour).size()>1) {
+                vector<cv::Point> temp_point;
+                temp_point.push_back((*iter_contour)[0]);
+                iter_contour = dilate_contours.erase(iter_contour);
+                dilate_contours.push_back(temp_point);
+            }
+
+            else
+                iter_contour++;
+        }
+    }
+
+//    cv::drawContours(erode_result2,erode_contours,-1,cv::Scalar(255), cv::FILLED);
+//    cv::drawContours(dilate_result2,dilate_contours,-1,cv::Scalar(255), cv::FILLED);
+
+    cv::Point2i centerCoord;
+    vector<vector<cv::Point>>::iterator iter_contourMin = erode_contours.begin();
+    while(iter_contourMin != erode_contours.end()){
+        centerCoord = (*iter_contourMin).at(0);
+        fprintf(fpoutETAMin,"%d %d %f\n", centerCoord.x,centerCoord.y,input.at<double>((*iter_contourMin).at(0)));
+        iter_contourMin++;
+    }
+    fclose(fpoutETAMin);
+
+    vector<vector<cv::Point>>::iterator iter_contourMax = dilate_contours.begin();
+    while(iter_contourMax != dilate_contours.end()){
+        centerCoord = (*iter_contourMax).at(0);
+        fprintf(fpoutETAMax,"%d %d %f\n", centerCoord.x,centerCoord.y,input.at<double>((*iter_contourMax).at(0)));
+        iter_contourMax++;
+    }
+    fclose(fpoutETAMax);
+    erode_contours.insert(erode_contours.end(),dilate_contours.begin(),dilate_contours.end());
+//    cv::drawContours(eta_Peaks,erode_contours,-1,cv::Scalar(255), cv::FILLED);
+
+
+    iter_contour = erode_contours.begin();
+    while(iter_contour != erode_contours.end()){
+//        if(input.at<double>((*iter_contour).at(0)) != 0)
+            eta_centorid.push_back(make_pair((*iter_contour).at(0), input.at<double>((*iter_contour).at(0))));
+        iter_contour++;
+
+    }
+
+    delete[] ETA_vals;
+    return 0;
+
+}
+
+bool ReadNcData_SSH_MultiFrame(vector<pair<cv::Point2d,double>>& eta_centorid, string ncFileName, int x_dim, int y_dim,const string OutputOcdfile, const size_t timeFrame)
+{
+
+    FILE *fpoutETAMax;
+    char OutOcd_etaMax[256];
+    FILE *fpoutETAMin;
+    char OutOcd_etaMin[256];
+
+    string Output_eta = OutputOcdfile;
+    Output_eta = Output_eta.substr(0, Output_eta.rfind("."));
+    String Output_etaMax = Output_eta + "_EtaCenterMax.uocd";
+    strcpy(OutOcd_etaMax,Output_etaMax.c_str());
+    fpoutETAMax = fopen(OutOcd_etaMax, "w");
+    String Output_etaMin = Output_eta + "_EtaCenterMin.uocd";
+    strcpy(OutOcd_etaMin,Output_etaMin.c_str());
+    fpoutETAMin = fopen(OutOcd_etaMin, "w");
+
+
+    static int NDIMS = 4;//?
+    const size_t x_rho = x_dim;
+    const size_t y_rho = y_dim;
+
+    int ocean_time = 1;
+    int retval;
+    double *ETA_vals = new double[x_rho*y_rho*1];
+    int ETA_varid;
+    int ncid;
+
+    size_t dataStart[] = {timeFrame,0,0};
+    size_t dataCount[] = {1,y_rho,x_rho};
+
+
+
+    if ((retval = nc_open(ncFileName.c_str(), NC_NOWRITE, &ncid)))
+        cout<<"couldnt open the file :[ "<<ncFileName.c_str()<<" ---- !!!"<<endl;
+
+
+    if ((retval = nc_inq_varid(ncid, "ETA", &ETA_varid))){
+        cout<<"No ETA Data"<<endl;
+        return 1;
+    }
+
+    if ((retval = nc_get_vara_double(ncid, ETA_varid, dataStart, dataCount,ETA_vals)))
+        cout<<"couldnt open 4.3 the file :[ "<<ncFileName.c_str()<<" ---- !!!"<<endl;
+
+    Mat input = Mat(x_dim, y_dim, CV_64FC1,ETA_vals,cv::Mat::AUTO_STEP);
+//    std::memcpy(input.data, ETA_vals,x_dim*y_dim*sizeof(double));
+
+//    Mat dilate_result2 = Mat::zeros(cv::Size(input.rows,input.cols),CV_8U);
+//    Mat erode_result2 = Mat::zeros(cv::Size(input.rows,input.cols),CV_8U);
+//    Mat eta_Peaks = Mat::zeros(cv::Size(input.rows,input.cols),CV_8U);
+    Mat input_dilate;
+    Mat input_erode;
+    Mat dilate_result;
+    Mat erode_result;
+//    cv::GaussianBlur(input,input,cv::Size(3,3),0.5);
+
+
+    //Re
+    Mat morph_kernal = getStructuringElement(MORPH_RECT, Size(7,7));
+    Mat morph_kernal2 = getStructuringElement(MORPH_RECT, Size(3,3));
+    cv::dilate(input,input_dilate,morph_kernal);
+    cv::erode(input,input_erode,morph_kernal);
+
+    cv::compare(input,input_dilate,dilate_result,CMP_EQ);
+    cv::compare(input,input_erode,erode_result,CMP_EQ);
+    morphologyEx(dilate_result, dilate_result, cv::MORPH_CLOSE,morph_kernal2);
+    morphologyEx(erode_result, erode_result, cv::MORPH_CLOSE,morph_kernal2);
+    vector<vector<cv::Point>> dilate_contours;
+    vector<vector<cv::Point>> erode_contours;
+    cv::findContours(dilate_result,dilate_contours,cv::RETR_LIST,cv::CHAIN_APPROX_NONE);
+    cv::findContours(erode_result,erode_contours,cv::RETR_LIST,cv::CHAIN_APPROX_NONE);
+    vector<vector<cv::Point>>::iterator iter_contour = erode_contours.begin();
+    while(iter_contour != erode_contours.end()){
+        if((*iter_contour).size()>100)
+            iter_contour = erode_contours.erase(iter_contour);
+        else{
+            if((*iter_contour).size()>2){
+                cv::Moments eta_moment = cv::moments(cv::Mat(*iter_contour));
+                cv::Point centerPoint = cv::Point(eta_moment.m10/eta_moment.m00, eta_moment.m01/eta_moment.m00);
+
+                if(centerPoint.x<0){
+                    int contourSizeCounter = 0;
+                    int xSum = 0;
+                    int ySum = 0;
+                    vector<cv::Point> isolateContour = (*iter_contour);
+                    while(contourSizeCounter<isolateContour.size()){
+                        xSum+=isolateContour.at(contourSizeCounter).x;
+                        ySum+=isolateContour.at(contourSizeCounter).y;
+                        contourSizeCounter++;
+                    }
+                    centerPoint.x = xSum/contourSizeCounter;
+                    centerPoint.y = ySum/contourSizeCounter;
+                }
+                iter_contour = erode_contours.erase(iter_contour);
+
+                vector<cv::Point> temp_point;
+                temp_point.push_back(centerPoint);
+                erode_contours.push_back(temp_point);
+            }
+            else if ((*iter_contour).size()>1) {
+                vector<cv::Point> temp_point;
+                temp_point.push_back((*iter_contour)[0]);
+                iter_contour = erode_contours.erase(iter_contour);
+                erode_contours.push_back(temp_point);
+            }
+            else
+                iter_contour++;
+        }
+    }
+
+    iter_contour = dilate_contours.begin();
+    while(iter_contour != dilate_contours.end()){
+        if((*iter_contour).size()>100)
+            iter_contour = dilate_contours.erase(iter_contour);
+        else{
+            if((*iter_contour).size()>2){
+                cv::Moments eta_moment = cv::moments(cv::Mat(*iter_contour));
+                cv::Point centerPoint = cv::Point(eta_moment.m10/eta_moment.m00, eta_moment.m01/eta_moment.m00);
+                if(centerPoint.x<0){
+                    int contourSizeCounter = 0;
+                    int xSum = 0;
+                    int ySum = 0;
+                    vector<cv::Point> isolateContour = (*iter_contour);
+                    while(contourSizeCounter<isolateContour.size()){
+                        xSum+=isolateContour.at(contourSizeCounter).x;
+                        ySum+=isolateContour.at(contourSizeCounter).y;
+                        contourSizeCounter++;
+                    }
+                    centerPoint.x = xSum/contourSizeCounter;
+                    centerPoint.y = ySum/contourSizeCounter;
+                }
+                iter_contour = dilate_contours.erase(iter_contour);
+                vector<cv::Point> temp_point;
+                temp_point.push_back(centerPoint);
+                dilate_contours.push_back(temp_point);
+            }
+
+            else if ((*iter_contour).size()>1) {
+                vector<cv::Point> temp_point;
+                temp_point.push_back((*iter_contour)[0]);
+                iter_contour = dilate_contours.erase(iter_contour);
+                dilate_contours.push_back(temp_point);
+            }
+
+            else
+                iter_contour++;
+        }
+    }
+
+//    cv::drawContours(erode_result2,erode_contours,-1,cv::Scalar(255), cv::FILLED);
+//    cv::drawContours(dilate_result2,dilate_contours,-1,cv::Scalar(255), cv::FILLED);
+
+    cv::Point2i centerCoord;
+    vector<vector<cv::Point>>::iterator iter_contourMin = erode_contours.begin();
+    while(iter_contourMin != erode_contours.end()){
+        centerCoord = (*iter_contourMin).at(0);
+        fprintf(fpoutETAMin,"%d %d %f\n", centerCoord.x,centerCoord.y,input.at<double>((*iter_contourMin).at(0)));
+        iter_contourMin++;
+    }
+    fclose(fpoutETAMin);
+
+    vector<vector<cv::Point>>::iterator iter_contourMax = dilate_contours.begin();
+    while(iter_contourMax != dilate_contours.end()){
+        centerCoord = (*iter_contourMax).at(0);
+        fprintf(fpoutETAMax,"%d %d %f\n", centerCoord.x,centerCoord.y,input.at<double>((*iter_contourMax).at(0)));
+        iter_contourMax++;
+    }
+    fclose(fpoutETAMax);
+    erode_contours.insert(erode_contours.end(),dilate_contours.begin(),dilate_contours.end());
+//    cv::drawContours(eta_Peaks,erode_contours,-1,cv::Scalar(255), cv::FILLED);
+
+
+    iter_contour = erode_contours.begin();
+    while(iter_contour != erode_contours.end()){
+//        if(input.at<double>((*iter_contour).at(0)) != 0)
+            eta_centorid.push_back(make_pair((*iter_contour).at(0), input.at<double>((*iter_contour).at(0))));
+        iter_contour++;
+
+    }
+
+    delete[] ETA_vals;
+    return 0;
+
+}
+
+bool ReadNcData_SSH_MultiFrame_2D(vector<pair<cv::Point2d,double>>& eta_centorid, string ncFileName, int x_dim, int y_dim,const string OutputOcdfile, const size_t timeFrame)
+{
+
+    FILE *fpoutETAMax;
+    char OutOcd_etaMax[256];
+    FILE *fpoutETAMin;
+    char OutOcd_etaMin[256];
+
+    string Output_eta = OutputOcdfile;
+    Output_eta = Output_eta.substr(0, Output_eta.rfind("."));
+    String Output_etaMax = Output_eta + "_EtaCenterMax.uocd";
+    strcpy(OutOcd_etaMax,Output_etaMax.c_str());
+    fpoutETAMax = fopen(OutOcd_etaMax, "w");
+    String Output_etaMin = Output_eta + "_EtaCenterMin.uocd";
+    strcpy(OutOcd_etaMin,Output_etaMin.c_str());
+    fpoutETAMin = fopen(OutOcd_etaMin, "w");
+
+
+    static int NDIMS = 4;//?
+    const size_t x_rho = x_dim;
+    const size_t y_rho = y_dim;
+
+    int ocean_time = 1;
+    int retval;
+    double *ETA_vals = new double[x_rho*y_rho*1];
+    int ETA_varid;
+    int ncid;
+
+    size_t dataStart[] = {timeFrame,0,0};
+    size_t dataCount[] = {1,y_rho,x_rho};
+
+
+
+    if ((retval = nc_open(ncFileName.c_str(), NC_NOWRITE, &ncid)))
+        cout<<"couldnt open the file :[ "<<ncFileName.c_str()<<" ---- !!!"<<endl;
+
+
+    if ((retval = nc_inq_varid(ncid, "zos", &ETA_varid))){
+        cout<<"No ETA Data"<<endl;
+        return 1;
+    }
+
+    if ((retval = nc_get_vara_double(ncid, ETA_varid, dataStart, dataCount,ETA_vals)))
+        cout<<"couldnt open 4.3 the file :[ "<<ncFileName.c_str()<<" ---- !!!"<<endl;
+
+    Mat input = Mat(y_dim, x_dim, CV_64FC1,ETA_vals,cv::Mat::AUTO_STEP);
+//    std::memcpy(input.data, ETA_vals,x_dim*y_dim*sizeof(double));
+
+//    Mat dilate_result2 = Mat::zeros(cv::Size(input.rows,input.cols),CV_8U);
+//    Mat erode_result2 = Mat::zeros(cv::Size(input.rows,input.cols),CV_8U);
+//    Mat eta_Peaks = Mat::zeros(cv::Size(input.rows,input.cols),CV_8U);
+    Mat input_dilate;
+    Mat input_erode;
+    Mat dilate_result;
+    Mat erode_result;
+//    cv::GaussianBlur(input,input,cv::Size(3,3),0.5);
+
+
+    //Re
+    Mat morph_kernal = getStructuringElement(MORPH_RECT, Size(7,7));
+    Mat morph_kernal2 = getStructuringElement(MORPH_RECT, Size(3,3));
+    cv::dilate(input,input_dilate,morph_kernal);
+    cv::erode(input,input_erode,morph_kernal);
+
+    cv::compare(input,input_dilate,dilate_result,CMP_EQ);
+    cv::compare(input,input_erode,erode_result,CMP_EQ);
+    morphologyEx(dilate_result, dilate_result, cv::MORPH_CLOSE,morph_kernal2);
+    morphologyEx(erode_result, erode_result, cv::MORPH_CLOSE,morph_kernal2);
+    vector<vector<cv::Point>> dilate_contours;
+    vector<vector<cv::Point>> erode_contours;
+    cv::findContours(dilate_result,dilate_contours,cv::RETR_LIST,cv::CHAIN_APPROX_NONE);
+    cv::findContours(erode_result,erode_contours,cv::RETR_LIST,cv::CHAIN_APPROX_NONE);
+    vector<vector<cv::Point>>::iterator iter_contour = erode_contours.begin();
+    while(iter_contour != erode_contours.end()){
+        if((*iter_contour).size()>100)
+            iter_contour = erode_contours.erase(iter_contour);
+        else{
+            if((*iter_contour).size()>2){
+                cv::Moments eta_moment = cv::moments(cv::Mat(*iter_contour));
+                cv::Point centerPoint = cv::Point(eta_moment.m10/eta_moment.m00, eta_moment.m01/eta_moment.m00);
+
+                if(centerPoint.x<0){
+                    int contourSizeCounter = 0;
+                    int xSum = 0;
+                    int ySum = 0;
+                    vector<cv::Point> isolateContour = (*iter_contour);
+                    while(contourSizeCounter<isolateContour.size()){
+                        xSum+=isolateContour.at(contourSizeCounter).x;
+                        ySum+=isolateContour.at(contourSizeCounter).y;
+                        contourSizeCounter++;
+                    }
+                    centerPoint.x = xSum/contourSizeCounter;
+                    centerPoint.y = ySum/contourSizeCounter;
+                }
+                iter_contour = erode_contours.erase(iter_contour);
+
+                vector<cv::Point> temp_point;
+                temp_point.push_back(centerPoint);
+                erode_contours.push_back(temp_point);
+            }
+            else if ((*iter_contour).size()>1) {
+                vector<cv::Point> temp_point;
+                temp_point.push_back((*iter_contour)[0]);
+                iter_contour = erode_contours.erase(iter_contour);
+                erode_contours.push_back(temp_point);
+            }
+            else
+                iter_contour++;
+        }
+    }
+
+    iter_contour = dilate_contours.begin();
+    while(iter_contour != dilate_contours.end()){
+        if((*iter_contour).size()>100)
+            iter_contour = dilate_contours.erase(iter_contour);
+        else{
+            if((*iter_contour).size()>2){
+                cv::Moments eta_moment = cv::moments(cv::Mat(*iter_contour));
+                cv::Point centerPoint = cv::Point(eta_moment.m10/eta_moment.m00, eta_moment.m01/eta_moment.m00);
+                if(centerPoint.x<0){
+                    int contourSizeCounter = 0;
+                    int xSum = 0;
+                    int ySum = 0;
+                    vector<cv::Point> isolateContour = (*iter_contour);
+                    while(contourSizeCounter<isolateContour.size()){
+                        xSum+=isolateContour.at(contourSizeCounter).x;
+                        ySum+=isolateContour.at(contourSizeCounter).y;
+                        contourSizeCounter++;
+                    }
+                    centerPoint.x = xSum/contourSizeCounter;
+                    centerPoint.y = ySum/contourSizeCounter;
+                }
+                iter_contour = dilate_contours.erase(iter_contour);
+                vector<cv::Point> temp_point;
+                temp_point.push_back(centerPoint);
+                dilate_contours.push_back(temp_point);
+            }
+
+            else if ((*iter_contour).size()>1) {
+                vector<cv::Point> temp_point;
+                temp_point.push_back((*iter_contour)[0]);
+                iter_contour = dilate_contours.erase(iter_contour);
+                dilate_contours.push_back(temp_point);
+            }
+
+            else
+                iter_contour++;
+        }
+    }
+
+//    cv::drawContours(erode_result2,erode_contours,-1,cv::Scalar(255), cv::FILLED);
+//    cv::drawContours(dilate_result2,dilate_contours,-1,cv::Scalar(255), cv::FILLED);
+
+    cv::Point2i centerCoord;
+    vector<vector<cv::Point>>::iterator iter_contourMin = erode_contours.begin();
+    while(iter_contourMin != erode_contours.end()){
+        centerCoord = (*iter_contourMin).at(0);
+        fprintf(fpoutETAMin,"%d %d %f\n", centerCoord.x,centerCoord.y,input.at<double>((*iter_contourMin).at(0)));
+        iter_contourMin++;
+    }
+    fclose(fpoutETAMin);
+
+    vector<vector<cv::Point>>::iterator iter_contourMax = dilate_contours.begin();
+    while(iter_contourMax != dilate_contours.end()){
+        centerCoord = (*iter_contourMax).at(0);
+        fprintf(fpoutETAMax,"%d %d %f\n", centerCoord.x,centerCoord.y,input.at<double>((*iter_contourMax).at(0)));
+        iter_contourMax++;
+    }
+    fclose(fpoutETAMax);
+    erode_contours.insert(erode_contours.end(),dilate_contours.begin(),dilate_contours.end());
+//    cv::drawContours(eta_Peaks,erode_contours,-1,cv::Scalar(255), cv::FILLED);
+
+
+    iter_contour = erode_contours.begin();
+    while(iter_contour != erode_contours.end()){
+//        if(input.at<double>((*iter_contour).at(0)) != 0)
+            eta_centorid.push_back(make_pair((*iter_contour).at(0), input.at<double>((*iter_contour).at(0))));
+        iter_contour++;
+
+    }
+
+    delete[] ETA_vals;
+    return 0;
+
+}
+
 
 
 void ReadVtkDataFile(float ** Data_out,string FileName,float ** Xcoord, float**Ycoord, float **Zcoord, int x_dim, int y_dim, int z_dim)
@@ -2353,7 +4444,7 @@ void ReadGridFile(vector<string> DataSetName, const char *FileName,float ** Xcoo
     
 }
 
-vtkSmartPointer<vtkDataSet> CreateVtkDataSet(string &FileExtention,string FileName, long x_dim, long y_dim, long z_dim,string data_path,long x0_dim, long y0_dim, long z0_dim, long x1_dim, long y1_dim, long z1_dim)
+vtkSmartPointer<vtkDataSet> CreateVtkDataSet(string &FileExtention, string FileName, long x_dim, long y_dim, long z_dim, double* zLevel, string data_path,string stackedNcFilePath,long x0_dim, long y0_dim, long z0_dim, long x1_dim, long y1_dim, long z1_dim, int timeFrame)
 {
     //this is the main data read function. This function takes the data file extension and makes a comparison to check if it fits into the known extension types.
     // Currently this function can read netCDF, HDF5, VTK and VTR types).
@@ -2371,6 +4462,7 @@ vtkSmartPointer<vtkDataSet> CreateVtkDataSet(string &FileExtention,string FileNa
     string vtrfileextensionname=".vtr";
     string vtkfileextensionname=".vtk";
     string ncfileextensionname=".nc";
+    string nc4fileextensionname=".nc4";
     int numberofComponents;
     if(dataType == Scalar_data)
         numberofComponents = 1;
@@ -2402,7 +4494,7 @@ vtkSmartPointer<vtkDataSet> CreateVtkDataSet(string &FileExtention,string FileNa
         
         hsize_t     dims[3];
         herr_t      status, status_n;
-        
+
         dims[0]=(int) x_dim;
         dims[1]=(int) y_dim;
         dims[2]=(int) z_dim;
@@ -2491,15 +4583,58 @@ vtkSmartPointer<vtkDataSet> CreateVtkDataSet(string &FileExtention,string FileNa
     {
         
         cout<<" inside the nc reading string comparision\n";
-        vtkDataSet * output = ReadNcDataFile_Backup(&data_out,FileName,&Xcoord, &Ycoord, &Zcoord, x_dim, y_dim, z_dim,numberofComponents);
+
+        vtkSmartPointer<vtkDataSet>output;
+
+        if(stackedNcFilePath == "None")
+            output = ReadNcDataFile_Singleframe(&data_out,FileName,&Xcoord, &Ycoord, &Zcoord, x_dim, y_dim, z_dim, zLevel, numberofComponents);
+        else{
+            if(z_dim==1)
+                output = ReadNcDataFile_Multiframe_2D(&data_out,stackedNcFilePath,&Xcoord, &Ycoord, &Zcoord, x_dim, y_dim, z_dim, zLevel, numberofComponents, timeFrame);
+            else
+                output = ReadNcDataFile_Multiframe(&data_out,stackedNcFilePath,&Xcoord, &Ycoord, &Zcoord, x_dim, y_dim, z_dim, zLevel, numberofComponents, timeFrame);
+        }
+
         unsigned long nnodes = ((long)x_dim) * ((long)y_dim) * ((long)z_dim);
         
         return output;
         
     }
 
-//    else
-//        cout<<"unsupported data file format!!"<<endl;
+    else if (strcmp (nc4fileextensionname.c_str(),FileExtention.c_str()) == 0 ) //read nc4 file
+    {
+
+        cout<<" inside the nc reading string comparision\n";
+
+        vtkSmartPointer<vtkDataSet>output;
+
+        if(stackedNcFilePath == "None")
+            output = ReadNcDataFile_Singleframe(&data_out,FileName,&Xcoord, &Ycoord, &Zcoord, x_dim, y_dim, z_dim, zLevel, numberofComponents);
+        else{
+            if(z_dim==1)
+                output = ReadNcDataFile_Multiframe_2D(&data_out,stackedNcFilePath,&Xcoord, &Ycoord, &Zcoord, x_dim, y_dim, z_dim, zLevel, numberofComponents, timeFrame);
+            else
+                output = ReadNcDataFile_Multiframe(&data_out,stackedNcFilePath,&Xcoord, &Ycoord, &Zcoord, x_dim, y_dim, z_dim, zLevel, numberofComponents, timeFrame);
+        }
+
+
+        std::filebuf file_Buff;
+        file_Buff.open("./test.txt", std::ios::out);
+        std::ostream os(&file_Buff);
+
+        output->Print(os);
+
+        file_Buff.close();
+
+
+        unsigned long nnodes = ((long)x_dim) * ((long)y_dim) * ((long)z_dim);
+
+        return output;
+
+    }
+
+
+        //        cout<<"unsupported data file format!!"<<endl;
 
 //    vtkDataSet *mesh;
     
@@ -2869,24 +5004,26 @@ int BeginObjSegment(vtkDataSet *in_ds,vtkDataSet **outDS,int celltype,int curren
 //
 //------------------------------------------------------
 
-void parseConfigFile(string &base_GeneratedTrackFileName, string &Datapath, string &FileBaseName, string &FileExtention,vector<string> &variableNamesvect, string Configfilename, int &InitialtimeStep, int &FinaltimeStep,
+void parseConfigFile(string &base_GeneratedTrackFileName, string &Datapath, string& ncFilePath, string &FileBaseName, string &FileExtention,vector<string> &variableNamesvect, string Configfilename, int &InitialtimeStep, int &FinaltimeStep,
                      float &deltaxval, float &deltayval, float &deltazval,int &SmallestObjVol,
-                     int &TimePrecision, int &TimeIncrement, float &thresh1, float &thresh2,long & x_dim, long &y_dim, long &z_dim,long & x0_dim, long &y0_dim, long &z0_dim,  long & x1_dim, long &y1_dim, long &z1_dim )
+                     int &TimePrecision, int &TimeIncrement, float &thresh1, float &thresh2,long & x_dim, long &y_dim, long &z_dim,long & x0_dim, long &y0_dim, long &z0_dim,  long & x1_dim, long &y1_dim, long &z1_dim, int& CircleStartRadius )
 {
     // this function reads each individual variable indicated within the Config file and returns them....
     
-    string output, datapath, base_filename, initialTimeStep, finalTimeStep,timestepIncrement,fileExtention,
+    string output, datapath, ncFile, base_filename, initialTimeStep, finalTimeStep,timestepIncrement,fileExtention,
     Threshold1, Threshold2, timestepPrecision, deltaxthreshold,deltaythreshold,deltazthreshold,
-    smallestObjVolToTrack, variableNames, xdim, ydim, zdim, x0dim, y0dim, z0dim, x1dim, y1dim, z1dim, FileGeneratedTrackFileName;
+    smallestObjVolToTrack, variableNames, xdim, ydim, zdim, x0dim, y0dim, z0dim, x1dim, y1dim, z1dim, FileGeneratedTrackFileName,SearchRadius;
     //vector<string> variableNamesvect;
     cout<<" -----------  Reading the "<<Configfilename<< " Config file ---------"<<endl;
     datapath = string("DATA_FILES_PATH:").c_str();
+    ncFile = string("STACKED_NC_DATA_PATH:").c_str();
     base_filename = string("FILE_BASE_NAME:").c_str();
     initialTimeStep = string("INITIAL_TIME_STEP:").c_str();
     finalTimeStep = string("FINAL_TIME_STEP:").c_str();
     timestepIncrement = string("TIME_STEP_INCREMENT:").c_str();
     Threshold1 = string("THRESHOLD1:").c_str();
     Threshold2 = string("THRESHOLD2:").c_str();
+    SearchRadius = string("STARTRADIUS:").c_str();
     timestepPrecision = string("TIME_STEP_PRECISION:").c_str();
     deltaxthreshold = string("DELTA_X_THRESHOLD:").c_str();
     deltaythreshold = string("DELTA_Y_THRESHOLD:").c_str();
@@ -2918,6 +5055,12 @@ void parseConfigFile(string &base_GeneratedTrackFileName, string &Datapath, stri
             {
                 myreadfile >> output;
                 Datapath = output;
+            }
+
+            if ( output == ncFile)
+            {
+                myreadfile >> output;
+                ncFilePath = output;
             }
             
             if ( output == FileGeneratedTrackFileName)
@@ -2963,7 +5106,12 @@ void parseConfigFile(string &base_GeneratedTrackFileName, string &Datapath, stri
                 myreadfile >> output;
                 thresh2 = atof(output.c_str());
             }
-            
+
+            if ( output == SearchRadius)
+            {
+                myreadfile >> output;
+                CircleStartRadius = atof(output.c_str());
+            }
             if ( output == timestepPrecision)
             {
                 myreadfile >> output;
@@ -3140,7 +5288,7 @@ int CreateListFile(string trk_dir, string infile,string &listfile,int Initialtim
     }
     //write the directory path
     fp << trk_dir << endl;
-    for(register int i=InitialtimeStep;i<FinaltimeStep+1;i+=TimeIncrement)
+    for(int i=InitialtimeStep;i<FinaltimeStep+1;i+=TimeIncrement)
     {
         string temp;
         temp=datafile+precision_time(i,TimePrecision);
@@ -3252,10 +5400,11 @@ bool ReadOct(string baseName,Frame& frm,int step,  vector<vector<TrackObject> > 
     fp.open(octFName.c_str(),ios_base::in);
     if(!fp.good())
         cout << "ReadOct:cannot open uocd file to read\n";
-    string dummy_string;
+//    string dummy_string;
     float time = 0.0;
-    fp>>dummy_string;
-    fp>>time;
+    string dummy_string;
+//    fp>>dummy_string;
+//    fp>>time;
     int numObjs = 0;
 //    fp>>numObjs;
     numObjs = frm.objVols.size();
@@ -3309,11 +5458,32 @@ bool ReadOct(string baseName,Frame& frm,int step,  vector<vector<TrackObject> > 
         objs[step][objID].max_x=(int)x1;
         objs[step][objID].max_y=(int)y1;
         objs[step][objID].max_z=(int)z1;
+        objs[step][objID].Pac_ID=i+1;
         
+
         frm.nodes[k].NodeID = vertID;
         frm.nodes[k].ObjID=i;
+        frm.nodes[k].xCoord=x1;
+        frm.nodes[k].yCoord=y1;
+        frm.nodes[k].zCoord=z1;
+        frm.nodes[k].NodeID = vertID;
         k++;
+
+        // Approximate Max/Min Coord
+        if(x1>frm.xMax)
+            frm.xMax=x1;
+        if(y1>frm.yMax)
+            frm.yMax=y1;
+        if(z1>frm.zMax)
+            frm.zMax=z1;
+        if(x1<frm.xMin)
+            frm.xMin=x1;
+        if(y1<frm.yMin)
+            frm.yMin=y1;
+        if(z1<frm.zMin)
+            frm.zMin=z1;
         
+	int surfCounter = 0;
         for (j=0; j<vol-1; j++)
         {
             // Change it when the number of components changed
@@ -3325,8 +5495,15 @@ bool ReadOct(string baseName,Frame& frm,int step,  vector<vector<TrackObject> > 
 //            fp>>dummyval_1>>dummyval_2>>dummyval_3>>dummyval_4>>dummyval_5>>vertID>>x1>>y1>>z1>>val;
             frm.nodes[k].NodeID = vertID;
             frm.nodes[k].ObjID=i;
+            frm.nodes[k].xCoord=x1;
+            frm.nodes[k].yCoord=y1;
+            frm.nodes[k].zCoord=z1;
+
+            if(z1==bounds[4])
+                surfCounter++;
             k++;
         }
+        frm.objVols[i].objSurfVol=surfCounter;
         if(dataType == Tensor_data)
             fp>>dummyval_1>>dummyval_2>>dummyval_3>>dummyval_4>>dummyval_5;
     }
@@ -3981,7 +6158,219 @@ TrakPackets(string base_GeneratedTrackFileName, int cycle,string label, vector<s
 }
 
 
+void parseConfigFile(string &base_GeneratedTrackFileName, string &Datapath, string &FileBaseName, string &FileExtention,vector<string> &variableNamesvect, string Configfilename, int &InitialtimeStep, int &FinaltimeStep,
+                              float &deltaxval, float &deltayval, float &deltazval,int &SmallestObjVol,
+                              int &TimePrecision, int &TimeIncrement, float &thresh1, float &thresh2,long & x_dim, long &y_dim, long &z_dim,long & x0_dim, long &y0_dim, long &z0_dim,  long & x1_dim, long &y1_dim, long &z1_dim )
+         {
+             // this function reads each individual variable indicated within the Config file and returns them....
 
+             string output, datapath, base_filename, initialTimeStep, finalTimeStep,timestepIncrement,fileExtention,
+             Threshold1, Threshold2, timestepPrecision, deltaxthreshold,deltaythreshold,deltazthreshold,
+             smallestObjVolToTrack, variableNames, xdim, ydim, zdim, x0dim, y0dim, z0dim, x1dim, y1dim, z1dim, FileGeneratedTrackFileName;
+             //vector<string> variableNamesvect;
+             cout<<" -----------  Reading the "<<Configfilename<< " Config file ---------"<<endl;
+             datapath = string("DATA_FILES_PATH:").c_str();
+             base_filename = string("FILE_BASE_NAME:").c_str();
+             initialTimeStep = string("INITIAL_TIME_STEP:").c_str();
+             finalTimeStep = string("FINAL_TIME_STEP:").c_str();
+             timestepIncrement = string("TIME_STEP_INCREMENT:").c_str();
+             Threshold1 = string("THRESHOLD1:").c_str();
+             Threshold2 = string("THRESHOLD2:").c_str();
+             timestepPrecision = string("TIME_STEP_PRECISION:").c_str();
+             deltaxthreshold = string("DELTA_X_THRESHOLD:").c_str();
+             deltaythreshold = string("DELTA_Y_THRESHOLD:").c_str();
+             deltazthreshold = string("DELTA_Z_THRESHOLD:").c_str();
+             smallestObjVolToTrack = string("SMALLEST_OBJECT_VOLUME_TO_TRACK:").c_str();
+             variableNames = string("VARIABLE_NAMES:").c_str();
+             fileExtention = string("FILE_EXTENSION:").c_str();
+             x1dim =string("X1_Dim:").c_str();
+             y1dim =string("Y1_Dim:").c_str();
+             z1dim =string("Z1_Dim:").c_str();
+             x0dim =string("X0_Dim:").c_str();
+             y0dim =string("Y0_Dim:").c_str();
+             z0dim =string("Z0_Dim:").c_str();
+             xdim =string("X_Dim:").c_str();
+             ydim =string("Y_Dim:").c_str();
+             zdim =string("Z_Dim:").c_str();
+             FileGeneratedTrackFileName =string("GENERATED_FILES_PATH:").c_str();
+
+             ifstream myreadfile;
+             myreadfile.open(Configfilename.c_str(),ios_base::out);
+             if (myreadfile.is_open())
+             {
+
+                 while (!myreadfile.eof())
+                 {
+                     myreadfile >> output;
+
+                     if ( output == datapath)
+                     {
+                         myreadfile >> output;
+                         Datapath = output;
+                     }
+
+                     if ( output == FileGeneratedTrackFileName)
+                     {
+                         myreadfile >> output;
+                         base_GeneratedTrackFileName = output;
+                     }
+
+
+                     if ( output == fileExtention)
+                     {
+                         myreadfile >> output;
+                         FileExtention = output;
+                     }
+
+                     if ( output == base_filename)
+                     {
+                         myreadfile >> output;
+                         FileBaseName = output;
+                     }
+                     if ( output == initialTimeStep)
+                     {
+                         myreadfile >> output;
+                         InitialtimeStep = atoi(output.c_str());
+                     }
+                     if ( output == finalTimeStep)
+                     {
+                         myreadfile >> output;
+                         FinaltimeStep = atoi(output.c_str());
+                     }
+                     if ( output == timestepIncrement)
+                     {
+                         myreadfile >> output;
+                         TimeIncrement = atoi(output.c_str());
+                     }
+                     if ( output == Threshold1)
+                     {
+                         myreadfile >> output;
+                         thresh1 = atof(output.c_str());
+                     }
+                     if ( output == Threshold2)
+                     {
+                         myreadfile >> output;
+                         thresh2 = atof(output.c_str());
+                     }
+
+                     if ( output == timestepPrecision)
+                     {
+                         myreadfile >> output;
+                         TimePrecision = atoi(output.c_str());
+                     }
+
+
+
+                     if ( output == xdim)
+                     {
+                         myreadfile >> output;
+                         x_dim = atoi(output.c_str());
+                     }
+
+                     if ( output == ydim)
+                     {
+                         myreadfile >> output;
+                         y_dim = atoi(output.c_str());
+                     }
+                     if ( output == zdim)
+                     {
+                         myreadfile >> output;
+                         z_dim = atoi(output.c_str());
+                     }
+
+
+                     if ( output == x1dim)
+                     {
+                         myreadfile >> output;
+                         x1_dim = atoi(output.c_str());
+                     }
+
+                     if ( output == y1dim)
+                     {
+                         myreadfile >> output;
+                         y1_dim = atoi(output.c_str());
+                     }
+                     if ( output == z1dim)
+                     {
+                         myreadfile >> output;
+                         z1_dim = atoi(output.c_str());
+                     }
+
+
+
+
+                     if ( output == x0dim)
+                     {
+                         myreadfile >> output;
+                         x0_dim = atoi(output.c_str());
+                     }
+
+                     if ( output == y0dim)
+                     {
+                         myreadfile >> output;
+                         y0_dim = atoi(output.c_str());
+                     }
+                     if ( output == z0dim)
+                     {
+                         myreadfile >> output;
+                         z0_dim = atoi(output.c_str());
+                     }
+
+
+
+                     if ( output == deltaxthreshold)
+                     {
+                         myreadfile >> output;
+                         deltaxval = atof(output.c_str());
+                     }
+                     if ( output == deltaythreshold)
+                     {
+                         myreadfile >> output;
+                         deltayval = atof(output.c_str());
+                     }
+                     if ( output == deltazthreshold)
+                     {
+                         myreadfile >> output;
+                         deltazval = atof(output.c_str());
+                     }
+                     if ( output == smallestObjVolToTrack)
+                     {
+                         myreadfile >> output;
+                         SmallestObjVol = atoi(output.c_str());
+                     }
+                     if ( output == variableNames)
+                     {
+                         myreadfile >> output;
+                         variableNamesvect.push_back(output.c_str());
+                         //	myreadfile >> output;
+                         //	variableNamesvect.push_back(output.c_str());
+                     }
+                 }
+                 myreadfile.close();
+                 //   cout<<j<<" "<<i<<" :<<j & i value"<<endl;
+             }
+             else
+             {
+                 cout<< "Cannot open the FeatureTrack.Conf File.!!!"<<endl;
+             }
+             cout<<" Data Path: "<< Datapath <<endl;
+             cout<<" GeneratedFilePath: "<< base_GeneratedTrackFileName <<endl;
+             cout<<" base_filename: "<< FileBaseName <<endl;
+             cout<<" file_extension: "<< FileExtention<<endl;
+             cout<<" initialTimeStep: "<< InitialtimeStep <<endl;
+             cout<<" FinaltimeStep: "<< FinaltimeStep <<endl;
+             cout<<" TimeIncrement: "<< TimeIncrement <<endl;
+             cout<<" thresh1: "<< thresh1 <<endl;
+             cout<<" thresh2: "<< thresh2<<endl;
+             cout<<" TimePrecision: "<< TimePrecision <<endl;
+             cout<<" deltaxval: "<< deltaxval <<endl;
+             cout<<" deltayval: "<< deltayval <<endl;
+             cout<<" deltazval: "<< deltazval <<endl;
+             cout<<" SmallestObjVol: "<< SmallestObjVol <<endl;
+             for(int i=0;i<variableNamesvect.size();i++)
+                 cout<<" variableNamesvect[ "<<i<<"]"<< variableNamesvect[i]<<endl;
+
+         }
 
 
 
@@ -4591,14 +6980,32 @@ int BeginFeatureTrack(string base_GeneratedTrackFileName, string currenttimevalu
     }
     cout<<"inside beginfeaturetrack 4"<<endl;
     Frame t1, t2;
+
+    t1.xMin=bounds[0];
+    t1.xMax=bounds[1];
+    t1.yMin=bounds[2];
+    t1.yMax=bounds[3];
+    t1.zMin=bounds[4];
+    t1.zMax=bounds[5];
+    t2.xMin=bounds[0];
+    t2.xMax=bounds[1];
+    t2.yMin=bounds[2];
+    t2.yMax=bounds[3];
+    t2.zMin=bounds[4];
+    t2.zMax=bounds[5];
+
     // because the minimum of TRackedFr is 1(if 0, then program should have returned earlier)
     
+    //Read the information from .trak file
     if(!ReadTrak(time_filename.at(TrackedFr-1), t1)) // <<<<<<<<<<
         return 0;
+
+    //Create default object lists across frames 200 frames/100000 objects per frame
+    //This is for t1 frame
     vector<vector<TrackObject> >
     objs( Consts::DEFAULT_TIMESTEP_NUM, vector<TrackObject>( Consts::MAXOBJS));
 
-    
+    //Read the .uocd file, including the object ID and vertices ID
     if(!ReadOct(time_filename.at(TrackedFr-1), t1, TrackedFr-1,objs)) // <<<<<<<
         return 0;
     
@@ -4647,259 +7054,2470 @@ int BeginFeatureTrack(string base_GeneratedTrackFileName, string currenttimevalu
 
 // By Weiping Hua
 // For eddy test
-void checkRotation(const std::set<vtkIdType> &PointIdSet, const std::set<vtkIdType> &CellIdSet, vtkDataArray *data, vtkDataSet * in_ds, const double& Z_max, const double& Z_min, const string OutputOcdfile, bool& first_time, int currentTime, int ncomp, long &Uocd_objID){   //01/04/2021 By Weiping Hua
+//bool checkRotation(const std::set<vtkIdType> &PointIdSet, const std::set<vtkIdType> &CellIdSet, vtkDataArray *data, vtkDataSet *in_ds, const double& Z_max, const double& Z_min, const string OutputOcdfile, bool& first_time, int currentTime, int ncomp, long &Uocd_objID,const int& OW_min_index, double centroidToplayer_x, double centroidToplayer_y){   //01/04/2021 By Weiping Hua
 
 
-    // Initialization
-    double *temp_coord3D = new double[3];
-    std::set<vtkIdType> PointIdsResult;
-    std::set<vtkIdType> CellIdSet_result;
-    std::set<double> z_level;
-    CellIdSet_result.clear();
+//    // Initialization
+//    double *temp_coord3D = new double[3];
+//    std::set<vtkIdType> PointIdsResult;
+//    std::set<vtkIdType> CellIdSet_result;
+//    std::set<double> z_level;
+//    CellIdSet_result.clear();
 
 
-    double bound[6];
-    in_ds->GetBounds(bound);
-    double Bound_xMin = bound[0];
-    double Bound_xMax = bound[1];
-    double Bound_yMin = bound[2];
-    double Bound_yMax = bound[3];
+////    Mat OW_map = Mat::zeros(500,500, CV_32FC1);
 
-//    Mat OW_map = Mat::zeros(500,500, CV_32FC1);
+//    double *temp_val;
 
-    double *temp_val;
-
-    FILE *fpout2;
-    char OutOcd[256];
-    strcpy(OutOcd,OutputOcdfile.c_str());
-
-    FILE *fpout3;
-    char OutOcd_2[256];
-    string Output_2 = OutputOcdfile;
-    Output_2 = Output_2.substr(0, Output_2.rfind("."));
-    Output_2 = Output_2 + "_tested.uocd";
-    strcpy(OutOcd_2,Output_2.c_str());
+////    FILE *fpout2;
+////    char OutOcd[256];
+////    strcpy(OutOcd,OutputOcdfile.c_str());
 
 
-    //cout<<"outAttr is: "<<outAttr<<"!!!!!!!!"<<endl;
-    if (first_time == true){
-        if((fpout2 = fopen(OutOcd, "w"))==NULL)
-            cout << "cannot open outAttr file to write\n";
-//        fprintf(fpout2,"******uocd_filtered*****\n");
-//        fprintf(fpout2,"%d\n",currentTime);
 
-        if((fpout3 = fopen(OutOcd_2, "w"))==NULL)
-            cout << "cannot open outAttr file to write\n";
-//        fprintf(fpout3,"******uocd_filtered*****\n");
-//        fprintf(fpout3,"%d\n",currentTime);
-        first_time = false;
-    }
-    else{
-        if((fpout2 = fopen(OutOcd, "a"))==NULL)
-            cout << "cannot open outAttr file to write\n";
+////    //cout<<"outAttr is: "<<outAttr<<"!!!!!!!!"<<endl;
+////    if (first_time == true){
+////        if((fpout2 = fopen(OutOcd, "w"))==NULL)
+////            cout << "cannot open outAttr file to write\n";
+//////        fprintf(fpout2,"******uocd_filtered*****\n");
+//////        fprintf(fpout2,"%d\n",currentTime);
 
-        if((fpout3 = fopen(OutOcd_2, "a"))==NULL)
-            cout << "cannot open outAttr file to write\n";
-    }
+////        first_time = false;
+////    }
+////    else{
+////        if((fpout2 = fopen(OutOcd, "a"))==NULL)
+////            cout << "cannot open outAttr file to write\n";
+
+////    }
 
 
 
 
 
 
-    // Traverse every point in the top 5% layer for this object
+//    // Traverse every point in the top 5% layer for this object
 
 
-    for(std::set<vtkIdType>::iterator it=PointIdSet.begin(); it!=PointIdSet.end(); ++it){
-        vtkIdType pointindex = *it;
+//    for(std::set<vtkIdType>::iterator it=PointIdSet.begin(); it!=PointIdSet.end(); ++it){
+//        vtkIdType pointindex = *it;
 
-        temp_val = data->GetTuple(pointindex);
+//        temp_val = data->GetTuple(pointindex);
 
-        in_ds->GetPoint(pointindex,temp_coord3D);
+//        in_ds->GetPoint(pointindex,temp_coord3D);
 
-        if (temp_coord3D[2]<Z_min + (Z_max - Z_min)*0.05){
-            PointIdsResult.insert(pointindex);
-            z_level.insert(temp_coord3D[2]);
-
-
-            //We're not able to tranverse the cell list as well so just create a new cell list with minor errors (A little bit more)
-            vtkSmartPointer<vtkIdList> thispointsCellIds = vtkSmartPointer<vtkIdList>::New();
-            in_ds-> GetPointCells(pointindex, thispointsCellIds);
-            for(vtkIdType k = 0; k < thispointsCellIds->GetNumberOfIds(); k++)
-            {
-                CellIdSet_result.insert(thispointsCellIds->GetId(k));
-            }
-        }
-    }
-    int filteredPoint_size = PointIdsResult.size();
-    int computedLayer_size = 0;
-//    fprintf(fpout2,"%ld\n", Uocd_objID);
-//    fprintf(fpout2,"%d %f %f %f %f\n", filteredPoint_size, (float) -1.0, (float) -1.0, (float) -1.0, (float) -1.0 );
-//    fprintf(fpout2,"%f %f %f %f %f %f\n", (float) -1.0, (float) -1.0, (float) -1.0, (float) -1.0, (float) -1.0, (float) -1.0);
-//    Uocd_objID++;
+//        if (temp_coord3D[2]<Z_min + (Z_max - Z_min)*0.05){
+//            PointIdsResult.insert(pointindex);
+//            z_level.insert(temp_coord3D[2]);
 
 
-    //Calculate the center layer
-    unsigned short z_center = ceil(double(z_level.size())/2)-1;
-    set<double>::iterator it_z = z_level.begin();
-    advance(it_z, z_center);
-
-    double centroidToplayer_x = 0;
-    double centroidToplayer_y = 0;
-
-
-//    Coord_2D a = Coord_2D(2,2);
-//    Coord_2D b = Coord_2D(1,0);
-
-//    Coord_2D c = a - b;
-
-    // Tranverse every point in the center layer (in top 5%)
-    vtkNew<vtkPoints> pointTop;
-    double OW_min = 0;
-    double OW_X = 0;
-    double OW_Y = 0;
-    double OW_map_x = 0;
-    double OW_map_y = 0;
-    for(std::set<vtkIdType>::iterator it=PointIdsResult.begin(); it!=PointIdsResult.end(); ++it){
-        vtkIdType pointindex = *it;
-        temp_val = data->GetTuple(pointindex);
-        in_ds->GetPoint(pointindex,temp_coord3D);
-        fprintf(fpout2,"%6lld %9.6f %9.6f %9.6f  %f %f %f %f\n", pointindex, (float) temp_coord3D[0], (float) temp_coord3D[1], (float) temp_coord3D[2], (float) temp_val[0], (float)temp_val[1],(float)temp_val[2],(float)temp_val[3]);
-
-        if(temp_coord3D[2] == *it_z){
-
-            if(OW_min>=temp_val[0]){
-                OW_X = temp_coord3D[0];
-                OW_X = temp_coord3D[1];
-                OW_min = temp_val[0];
-            }
-
-            centroidToplayer_x += temp_coord3D[0];
-            centroidToplayer_y += temp_coord3D[1];
-//            OW_map_x = round((temp_coord3D[0] - Bound_xMin)/(Bound_xMax - Bound_xMin)*500);
-//            OW_map_y = round((temp_coord3D[1] - Bound_yMin)/(Bound_yMax - Bound_yMin)*500);
-////            OW_map.at<Vec3b>(OW_map_x,OW_map_y) = -temp_val[0]*10;
-//            OW_map.at<Vec3b>(OW_map_x,OW_map_y) = 1;
-
-
-            pointTop->InsertNextPoint(temp_coord3D[0],temp_coord3D[1],temp_coord3D[2]);
-            ++computedLayer_size;
-        }
-    }
-
-//    imshow("OW_map",OW_map);
-//    waitKey(0);
-//    double* test;
-//    test = pointTop->GetPoint(0);
-//    cout<<test[0]<<test[1]<<test[2];
+//            //We're not able to tranverse the cell list as well so just create a new cell list with minor errors (A little bit more)
+//            vtkNew<vtkIdList> thispointsCellIds;
+//            in_ds-> GetPointCells(pointindex, thispointsCellIds);
+//            for(vtkIdType k = 0; k < thispointsCellIds->GetNumberOfIds(); k++)
+//            {
+//                CellIdSet_result.insert(thispointsCellIds->GetId(k));
+//            }
+//        }
+//    }
+//    int filteredPoint_size = PointIdsResult.size();
+//    int computedLayer_size = 0;
 
 
 
-    //Get the centroid
-    centroidToplayer_x = centroidToplayer_x/computedLayer_size;
-    centroidToplayer_y = centroidToplayer_y/computedLayer_size;
-    double bounds[6];
-    pointTop->GetBounds(bounds);
+//    //Calculate the center layer
+//    unsigned short z_center = ceil(double(z_level.size())/2)-1;
+//    set<double>::iterator it_z = z_level.begin();
+//    advance(it_z, z_center);
 
 
-    // Find the four checking points(x,-x,y,-y)
-    vtkNew<vtkPoints> intersectPoints;
-    vtkNew<vtkPolyData>layer_top;
-    layer_top->SetPoints(pointTop);
 
-    double p0[3] = {bounds[0], centroidToplayer_y, *it_z};
-    double p1[3] = {bounds[1], centroidToplayer_y, *it_z};
-    double p2[3] = {centroidToplayer_x, bounds[2], *it_z};
-    double p3[3] = {centroidToplayer_x, bounds[3], *it_z};
 
-    vtkIdType cloest_id_0 = layer_top->FindPoint(p0[0],p0[1],p0[2]);
-    vtkIdType cloest_id_1 = layer_top->FindPoint(p1[0],p1[1],p1[2]);
-    vtkIdType cloest_id_2 = layer_top->FindPoint(p2[0],p2[1],p2[2]);
-    vtkIdType cloest_id_3 = layer_top->FindPoint(p3[0],p3[1],p3[2]);
+////    Coord_2D a = Coord_2D(2,2);
+////    Coord_2D b = Coord_2D(1,0);
 
-    double* point_in_ds_0 = new double[3];
-    double* point_in_ds_1 = new double[3];
-    double* point_in_ds_2 = new double[3];
-    double* point_in_ds_3 = new double[3];
+////    Coord_2D c = a - b;
 
-    layer_top->GetPoint(cloest_id_0, point_in_ds_0);
-    layer_top->GetPoint(cloest_id_1, point_in_ds_1);
-    layer_top->GetPoint(cloest_id_2, point_in_ds_2);
-    layer_top->GetPoint(cloest_id_3, point_in_ds_3);
+//    // Tranverse every point in the center layer (in top 5%)
+//    vtkNew<vtkPoints> pointTop;
+//    double OW_min = 0;
+//    double OW_X = 0;
+//    double OW_Y = 0;
+//    double OW_map_x = 0;
+//    double OW_map_y = 0;
+//    for(std::set<vtkIdType>::iterator it=PointIdsResult.begin(); it!=PointIdsResult.end(); ++it){
+//        vtkIdType pointindex = *it;
+//        temp_val = data->GetTuple(pointindex);
+//        in_ds->GetPoint(pointindex,temp_coord3D);
 
-    cloest_id_0 = in_ds->FindPoint(point_in_ds_0[0],point_in_ds_0[1],point_in_ds_0[2]);
-    cloest_id_1 = in_ds->FindPoint(point_in_ds_1[0],point_in_ds_1[1],point_in_ds_1[2]);
-    cloest_id_2 = in_ds->FindPoint(point_in_ds_2[0],point_in_ds_2[1],point_in_ds_2[2]);
-    cloest_id_3 = in_ds->FindPoint(point_in_ds_3[0],point_in_ds_3[1],point_in_ds_3[2]);
+//        if(temp_coord3D[2] == *it_z){
 
+////            if(OW_min>=temp_val[0]){
+////                OW_X = temp_coord3D[0];
+////                OW_Y = temp_coord3D[1];
+////                OW_min = temp_val[0];
+////            }
+
+////            centroidToplayer_x += temp_coord3D[0];
+////            centroidToplayer_y += temp_coord3D[1];
+////            OW_map_x = round((temp_coord3D[0] - Bound_xMin)/(Bound_xMax - Bound_xMin)*500);
+////            OW_map_y = round((temp_coord3D[1] - Bound_yMin)/(Bound_yMax - Bound_yMin)*500);
+//////            OW_map.at<Vec3b>(OW_map_x,OW_map_y) = -temp_val[0]*10;
+////            OW_map.at<Vec3b>(OW_map_x,OW_map_y) = 1;
+
+
+//            pointTop->InsertNextPoint(temp_coord3D[0],temp_coord3D[1],temp_coord3D[2]);
+//            ++computedLayer_size;
+//        }
+//    }
+
+////    imshow("OW_map",OW_map);
+////    waitKey(0);
+
+
+
+//    //Get the centroid
+
+
+
+//    pointTop->GetBounds(bounds);
+
+
+//    // Find the four checking points(x,-x,y,-y)
+//    vtkNew<vtkPoints> intersectPoints;
+//    vtkNew<vtkPolyData>layer_top;
+//    layer_top->SetPoints(pointTop);
+
+//    double p0[3] = {bounds[0], centroidToplayer_y, *it_z};
+//    double p1[3] = {bounds[1], centroidToplayer_y, *it_z};
+//    double p2[3] = {centroidToplayer_x, bounds[2], *it_z};
+//    double p3[3] = {centroidToplayer_x, bounds[3], *it_z};
+
+//    vtkIdType cloest_id_0 = layer_top->FindPoint(p0[0],p0[1],p0[2]);
+//    vtkIdType cloest_id_1 = layer_top->FindPoint(p1[0],p1[1],p1[2]);
+//    vtkIdType cloest_id_2 = layer_top->FindPoint(p2[0],p2[1],p2[2]);
+//    vtkIdType cloest_id_3 = layer_top->FindPoint(p3[0],p3[1],p3[2]);
+
+//    double* point_in_ds_0 = new double[3];
+//    double* point_in_ds_1 = new double[3];
+//    double* point_in_ds_2 = new double[3];
+//    double* point_in_ds_3 = new double[3];
+
+//    layer_top->GetPoint(cloest_id_0, point_in_ds_0);
+//    layer_top->GetPoint(cloest_id_1, point_in_ds_1);
+//    layer_top->GetPoint(cloest_id_2, point_in_ds_2);
+//    layer_top->GetPoint(cloest_id_3, point_in_ds_3);
+
+//    cloest_id_0 = in_ds->FindPoint(point_in_ds_0[0],point_in_ds_0[1],point_in_ds_0[2]);
+//    cloest_id_1 = in_ds->FindPoint(point_in_ds_1[0],point_in_ds_1[1],point_in_ds_1[2]);
+//    cloest_id_2 = in_ds->FindPoint(point_in_ds_2[0],point_in_ds_2[1],point_in_ds_2[2]);
+//    cloest_id_3 = in_ds->FindPoint(point_in_ds_3[0],point_in_ds_3[1],point_in_ds_3[2]);
 
 //    temp_val[1] and temp_val[2] are velocity in u and v directions
 
-//    fprintf(fpout2,"This is for eddy check\n");
-    temp_val = data->GetTuple(cloest_id_0);
-    in_ds->GetPoint(cloest_id_0,temp_coord3D);
-//    fprintf(fpout2,"%6lld %9.6f %9.6f %9.6f  %f %f %f %f\n", cloest_id_0, (float) temp_coord3D[0], (float) temp_coord3D[1], (float) temp_coord3D[2], (float) temp_val[0], (float)temp_val[1],(float)temp_val[2],(float)temp_val[3]);
-
-    float val_1 = (float)temp_val[1];
-    float val_2 = (float)temp_val[2];
+////    temp_val[1] and temp_val[2] are velocity in u and v directions
 
 
+//    temp_val = data->GetTuple(cloest_id_0);
+//    in_ds->GetPoint(cloest_id_0,temp_coord3D);
 
-    temp_val = data->GetTuple(cloest_id_1);
-    in_ds->GetPoint(cloest_id_1,temp_coord3D);
-//    fprintf(fpout2,"%6lld %9.6f %9.6f %9.6f  %f %f %f %f\n", cloest_id_1, (float) temp_coord3D[0], (float) temp_coord3D[1], (float) temp_coord3D[2], (float) temp_val[0], (float)temp_val[1],(float)temp_val[2],(float)temp_val[3]);
+//    float val_1 = (float)temp_val[1];
+//    float val_2 = (float)temp_val[2];
 
-    float val_3 = (float)temp_val[1];
-    float val_4 = (float)temp_val[2];
 
-    bool eddy_flag_x_1 = (val_1*val_3<0)||(val_2*val_4<0);
 
-    temp_val = data->GetTuple(cloest_id_2);
-    in_ds->GetPoint(cloest_id_2,temp_coord3D);
-//    fprintf(fpout2,"%6lld %9.6f %9.6f %9.6f  %f %f %f %f\n", cloest_id_2, (float) temp_coord3D[0], (float) temp_coord3D[1], (float) temp_coord3D[2], (float) temp_val[0], (float)temp_val[1],(float)temp_val[2],(float)temp_val[3]);
+//    temp_val = data->GetTuple(cloest_id_1);
+//    in_ds->GetPoint(cloest_id_1,temp_coord3D);
 
-    val_1 = (float)temp_val[1];
-    val_2 = (float)temp_val[2];
+//    float val_3 = (float)temp_val[1];
+//    float val_4 = (float)temp_val[2];
 
-    temp_val = data->GetTuple(cloest_id_3);
-    in_ds->GetPoint(cloest_id_3,temp_coord3D);
-//    fprintf(fpout2,"%6lld %9.6f %9.6f %9.6f  %f %f %f %f\n", cloest_id_3, (float) temp_coord3D[0], (float) temp_coord3D[1], (float) temp_coord3D[2], (float) temp_val[0], (float)temp_val[1],(float)temp_val[2],(float)temp_val[3]);
+//    bool eddy_flag_x_1 = (val_1*val_3<0)||(val_2*val_4<0);
 
-    val_1 = (float)temp_val[1];
-    val_2 = (float)temp_val[2];
+//    temp_val = data->GetTuple(cloest_id_2);
+//    in_ds->GetPoint(cloest_id_2,temp_coord3D);
 
-    bool eddy_flag_x_2 = (val_1*val_3<0)||(val_2*val_4<0);
+//    val_1 = (float)temp_val[1];
+//    val_2 = (float)temp_val[2];
 
-    if(eddy_flag_x_1 && eddy_flag_x_2){
-        for(std::set<vtkIdType>::iterator it=PointIdsResult.begin(); it!=PointIdsResult.end(); ++it){
-            vtkIdType pointindex = *it;
-            temp_val = data->GetTuple(pointindex);
-            in_ds->GetPoint(pointindex,temp_coord3D);
-            fprintf(fpout3,"%6lld %9.6f %9.6f %9.6f  %f %f %f %f\n", pointindex, (float) temp_coord3D[0], (float) temp_coord3D[1], (float) temp_coord3D[2], (float) temp_val[0], (float)temp_val[1],(float)temp_val[2],(float)temp_val[3]);
+//    temp_val = data->GetTuple(cloest_id_3);
+//    in_ds->GetPoint(cloest_id_3,temp_coord3D);
+
+//    val_1 = (float)temp_val[1];
+//    val_2 = (float)temp_val[2];
+
+//    bool eddy_flag_x_2 = (val_1*val_3<0)||(val_2*val_4<0);
+
+//    if(eddy_flag_x_1 && eddy_flag_x_2){
+////        for(std::set<vtkIdType>::iterator it=PointIdSet.begin(); it!=PointIdSet.end(); ++it){
+////            vtkIdType pointindex = *it;
+////            temp_val = data->GetTuple(pointindex);
+////            in_ds->GetPoint(pointindex,temp_coord3D);
+////            fprintf(fpout2,"%6lld %9.6f %9.6f %9.6f  %f %f %f %f\n", pointindex, (float) temp_coord3D[0], (float) temp_coord3D[1], (float) temp_coord3D[2], (float) temp_val[0], (float)temp_val[1],(float)temp_val[2],(float)temp_val[3]);
+////        }
+////        fclose(fpout2);
+//        delete[] temp_coord3D;
+//        delete[] point_in_ds_0;
+//        delete[] point_in_ds_1;
+//        delete[] point_in_ds_2;
+//        delete[] point_in_ds_3;
+//        return true;
+//    }
+//    else
+//    {
+////        fclose(fpout2);
+//        delete[] temp_coord3D;
+//        delete[] point_in_ds_0;
+//        delete[] point_in_ds_1;
+//        delete[] point_in_ds_2;
+//        delete[] point_in_ds_3;
+//        return false;
+//    }
+
+
+
+
+
+////    CellIdSet_Result.clear();
+////    CellIdSet_Result = CellIdSet_result;
+
+////    PointIdSet_Result.clear();
+////    PointIdSet_Result = PointIdsResult;
+
+////    PointIdSet_Result = PointIdSet;
+////    CellIdSet_Result = CellIdSet;
+
+
+
+
+
+////    delete[] temp_val;
+
+//}
+
+
+//Created on 01/04/2021 By Weiping Hua
+//bool checkRotation3(std::set<vtkIdType> &PointIdSet_Result, std::set<vtkIdType> &CellIdSet_Result, shared_ptr<bool[]>& ProcessedCell_step2, vtkDataArray *data, vtkDataSet *in_ds, cv::Point eta_centroid_point,
+//                    double& MaxXDimValue,double& MaxYDimValue,double& MaxZDimValue, double& MinXDimValue,double& MinYDimValue, double& MinZDimValue, int& OW_min_index, int& velocityMag_min_index, const string OutputOcdfile, bool& first_time){
+
+//    // Initialization
+//    double *temp_coord3D = new double[3];
+//    std::set<vtkIdType> PointIdsResult;
+//    std::set<double> z_level;
+
+
+
+//    double *temp_val;
+
+
+
+
+
+
+
+
+//    // Traverse every point in the top 5% layer for this object
+
+
+////    double dynamic_threshold = (0.25*local_minimum)<-1.5?(0.25*local_minimum):-1.5;
+
+
+//    std::set<vtkIdType> ThisObjectsMemberPointIds;
+//    std::set<vtkIdType> CandidateNeigborCellIdsToProcess;
+//    std::set<vtkIdType> ThisObjectsCellIds;
+
+//    CandidateNeigborCellIdsToProcess.clear();
+//    ThisObjectsCellIds.clear();
+//    ThisObjectsMemberPointIds.clear();
+//    std::set<vtkIdType>::iterator it1;
+//    vtkIdType cellId;
+
+
+//    double peakValue;
+//    double velocityMag_peak;
+//    in_ds->GetBounds(bounds);
+
+//    double eta_centroid_inDataset_x;
+//    double eta_centroid_inDataset_y;
+
+
+
+//    velocityMag_peak = DBL_MAX;
+//    vtkIdType minimum_Point_index;
+//    vtkIdType minimum_point_index_velocity_mag;
+
+
+//    for(int i = 0; i<15; i++){
+//        for(int j=0; j<15;j++){
+//            double* peakValue_temp = 0;
+//            double velocityMag_peak_temp;
+//            vtkIdType minimum_Point_index_temp;
+//            eta_centroid_inDataset_x = (eta_centroid_point.x - 7 + i)/500.0f*(bounds[1] - bounds[0]+0.04)+bounds[0];
+//            eta_centroid_inDataset_y = (eta_centroid_point.y - 7 + j)/500.0f*(bounds[3] - bounds[2]+0.04)+bounds[2];
+
+//            minimum_Point_index_temp = in_ds->FindPoint(eta_centroid_inDataset_x, eta_centroid_inDataset_y,bounds[4]);
+//            peakValue_temp = in_ds->GetPointData()->GetTensors()->GetTuple(minimum_Point_index_temp);
+//            velocityMag_peak_temp = sqrt(pow(peakValue_temp[1],2)+pow(peakValue_temp[2],2));
+//            if(peakValue_temp[0]<peakValue){
+//                peakValue = peakValue_temp[0];
+//                minimum_Point_index = minimum_Point_index_temp;
+//            }
+
+//            if(velocityMag_peak_temp<velocityMag_peak){
+//                velocityMag_peak = velocityMag_peak_temp;
+//                minimum_point_index_velocity_mag = minimum_Point_index_temp;
+//            }
+//        }
+//    }
+//    velocityMag_min_index = minimum_point_index_velocity_mag;
+//    OW_min_index = minimum_Point_index;
+//    double centroidToplayer_x = 0;
+//    double centroidToplayer_y = 0;
+//    double* OW_min_coord = in_ds->GetPoint(OW_min_index);
+//    centroidToplayer_x = OW_min_coord[0];
+//    centroidToplayer_y = OW_min_coord[1];
+
+//    double* velocity_min_coord = in_ds->GetPoint(velocityMag_min_index);
+//    double centroidToplayer_velocity_x = velocity_min_coord[0];
+//    double centroidToplayer_velocity_y = velocity_min_coord[1];
+//    minimum_Point_index = velocityMag_min_index;
+//    double* peakValue_mag;
+//    peakValue_mag = in_ds->GetPointData()->GetTensors()->GetTuple(minimum_Point_index);
+
+
+
+
+
+
+
+////    peakValue= in_ds->GetPointData()->GetTensors()->GetTuple(minimum_Point_index);
+//    if(peakValue_mag[0] >= 0)
+//        return false;
+//    dynamic_threshold = (peakValue_mag[0]*0.95f);
+
+
+//    vtkSmartPointer<vtkIdList> minimum_Cell_index = vtkSmartPointer<vtkIdList>::New();
+//    in_ds->GetPointCells(minimum_Point_index,minimum_Cell_index);
+////    int test = minimum_Cell_index->GetId(0);
+//    CandidateNeigborCellIdsToProcess.insert(minimum_Cell_index->GetId(0));
+
+//    while(CandidateNeigborCellIdsToProcess.size()>0)
+//    {
+
+//        it1 = CandidateNeigborCellIdsToProcess.begin();
+//        cellId = *it1; //CandidateNeigborCellIdsToProcess[0];
+//        CandidateNeigborCellIdsToProcess.erase (cellId);
+//        if(ProcessedCell_step2[(unsigned long)cellId] == false)
+//        {
+//            ProcessedCell_step2[(unsigned long)cellId] = true;
+//            vtkSmartPointer<vtkIdList> cellPointIds = vtkSmartPointer<vtkIdList>::New();
+//            in_ds->GetCellPoints(cellId, cellPointIds); //<--- this one gets the points of the current cell (cellId)
+//            for(vtkIdType j = 0; j < 8 ; j++) // for each cell point in this cell
+//            {
+//                vtkIdType pointindex = cellPointIds->GetId(j);
+//                double* temp_val_0;
+//                temp_val_0 = data->GetTuple(pointindex);
+
+
+
+//                // check whether we take the greater or smaller parts in the data...
+//                // Threshold must be positive
+//                bool testvalueForthisPoint = false;
+
+//                if (Greater)
+//                {
+//                    //cout<<"inside if"<<endl;
+//                    if(!Abs_value){
+//                        if(temp_val_0[0]>=dynamic_threshold)
+//                            testvalueForthisPoint = true;
+//                    }
+//                    else{
+//                        if(abs(temp_val_0[0])>=abs(dynamic_threshold))
+//                            testvalueForthisPoint = true;
+//                    }
+
+//                }
+//                else
+//                {
+//                    //cout<<"inside else"<<endl;
+//                    if(!Abs_value){
+//                        if (temp_val_0[0]<=dynamic_threshold)
+//                            testvalueForthisPoint = true;
+//                    }
+//                    else{
+//                        if (abs(temp_val_0[0])<=abs(dynamic_threshold))
+//                            testvalueForthisPoint = true;
+//                    }
+//                }
+
+
+//                if (testvalueForthisPoint) // we found a point.. :)
+//                {
+//                    //cout<<"inside the iftestvalue"<<endl;
+//                    //-----Find the bounding box of the object for filtering ---
+//                    if ( ThisDataType == 1) // do this computation only if you use it... :)
+//                    {
+////                    double *temp_coord3D = new double[3];
+//                    in_ds->GetPoint(pointindex,temp_coord3D);
+
+//                    if (temp_coord3D[0] > MaxXDimValue)
+//                        MaxXDimValue = temp_coord3D[0];
+
+//                    if (temp_coord3D[1] > MaxYDimValue)
+//                        MaxYDimValue = temp_coord3D[1];
+
+//                    if (temp_coord3D[2] > MaxZDimValue)
+//                        MaxZDimValue = temp_coord3D[2];
+
+
+
+//                    if (temp_coord3D[0] < MinXDimValue)
+//                        MinXDimValue = temp_coord3D[0];
+
+//                    if (temp_coord3D[1] < MinYDimValue)
+//                        MinYDimValue = temp_coord3D[1];
+
+
+//                    if (temp_coord3D[2] < MinZDimValue)
+//                        MinZDimValue = temp_coord3D[2];
+
+////                    delete[] temp_coord3D;
+////                    temp_coord3D = NULL;
+//                    }
+//                    //-----
+
+
+//                    // ThisObjectsCompleteCellIds.insert(cellId);
+//                    //ThisObjectsCellIds.push_back(cellId);
+//                    ThisObjectsCellIds.insert(cellId);
+//                    ThisObjectsMemberPointIds.insert(pointindex);
+//                    vtkSmartPointer<vtkIdList> thispointsCellIds = vtkSmartPointer<vtkIdList>::New();
+//                    in_ds-> GetPointCells(pointindex, thispointsCellIds);
+//                    for(vtkIdType k = 0; k < thispointsCellIds->GetNumberOfIds(); k++)
+//                    {
+//                        CandidateNeigborCellIdsToProcess.insert(thispointsCellIds->GetId(k));
+//                    }
+//                }
+//            }
+//        }
+//    }
+
+//    PointIdSet_Result = ThisObjectsMemberPointIds;
+//    CellIdSet_Result = ThisObjectsCellIds;
+
+
+////    for(std::set<vtkIdType>::iterator it=ThisObjectsMemberPointIds.begin(); it!=ThisObjectsMemberPointIds.end(); ++it){
+////        vtkIdType pointindex = *it;
+////        temp_val = data->GetTuple(pointindex);
+////        in_ds->GetPoint(pointindex,temp_coord3D);
+////        fprintf(fpout3,"%6lld %9.6f %9.6f %9.6f  %f %f %f %f\n", pointindex, (float) temp_coord3D[0], (float) temp_coord3D[1], (float) temp_coord3D[2], (float) temp_val[0], (float)temp_val[1],(float)temp_val[2],(float)temp_val[3]);
+
+////    }
+
+//    delete[] temp_coord3D;
+//    temp_coord3D = NULL;
+//    return true;
+
+//}
+
+
+
+//void checkRotation2(const std::set<vtkIdType> &PointIdSet, const std::set<vtkIdType> &CellIdSet, std::set<vtkIdType> &PointIdSet_Result, std::set<vtkIdType> &CellIdSet_Result, bool* ProcessedCell_step2, vtkDataArray *data, vtkDataSet *in_ds, const double& Z_max, const double& Z_min, const string OutputOcdfile, bool& first_time, int currentTime, int ncomp, long &Uocd_objID, double min_x, double min_y, double min_z){   //01/04/2021 By Weiping Hua
+
+
+//    // Initialization
+//    double *temp_coord3D = new double[3];
+//    std::set<vtkIdType> PointIdsResult;
+//    std::set<double> z_level;
+
+
+
+//    double *temp_val;
+
+
+
+//    FILE *fpout3;
+//    char OutOcd_2[256];
+//    string Output_2 = OutputOcdfile;
+//    Output_2 = Output_2.substr(0, Output_2.rfind("."));
+//    Output_2 = Output_2 + "_tested.uocd";
+//    strcpy(OutOcd_2,Output_2.c_str());
+
+
+//    //cout<<"outAttr is: "<<outAttr<<"!!!!!!!!"<<endl;
+//    if (first_time == true){
+
+//        if((fpout3 = fopen(OutOcd_2, "w"))==NULL)
+//            cout << "cannot open outAttr file to write\n";
+////        fprintf(fpout3,"******uocd_filtered*****\n");
+////        fprintf(fpout3,"%d\n",currentTime);
+//        first_time = false;
+//    }
+//    else{
+
+//        if((fpout3 = fopen(OutOcd_2, "a"))==NULL)
+//            cout << "cannot open outAttr file to write\n";
+//    }
+
+
+
+//    // Traverse every point in the top 5% layer for this object
+
+
+//    for(std::set<vtkIdType>::iterator it=PointIdSet.begin(); it!=PointIdSet.end(); ++it){
+//        vtkIdType pointindex = *it;
+
+//        temp_val = data->GetTuple(pointindex);
+
+//        in_ds->GetPoint(pointindex,temp_coord3D);
+
+//        if (temp_coord3D[2]<Z_min + (Z_max - Z_min)*0.05){
+//            PointIdsResult.insert(pointindex);
+//            z_level.insert(temp_coord3D[2]);
+//        }
+//    }
+//    int filteredPoint_size = PointIdsResult.size();
+//    int computedLayer_size = 0;
+
+
+//    double local_minimum = DBL_MAX;
+//    double local_min_X = 0;
+//    double local_min_Y = 0;
+//    double local_min_Z = 0;
+//    double OW_mean = 0;
+//    double OW_sqr_mean = 0;
+//    std::vector<double> OW_valueset;
+//    for(std::set<vtkIdType>::iterator it=PointIdsResult.begin(); it!=PointIdsResult.end(); ++it){
+//        vtkIdType pointindex = *it;
+//        temp_val = data->GetTuple(pointindex);
+//        in_ds->GetPoint(pointindex,temp_coord3D);
+////        fprintf(fpout2,"%6lld %9.6f %9.6f %9.6f  %f %f %f %f\n", pointindex, (float) temp_coord3D[0], (float) temp_coord3D[1], (float) temp_coord3D[2], (float) temp_val[0], (float)temp_val[1],(float)temp_val[2],(float)temp_val[3]);
+
+//        // Find the coordinates of the local minimum according to the OW value
+//        if(temp_val[0]<local_minimum){
+//            local_min_X = temp_coord3D[0];
+//            local_min_Y = temp_coord3D[1];
+//            local_min_Z = temp_coord3D[2];
+//            local_minimum = temp_val[0];
+//        }
+//        OW_valueset.push_back(temp_val[0]);
+//    }
+
+//    double data_size = OW_valueset.size();
+//    OW_mean = std::accumulate(OW_valueset.begin(),OW_valueset.end(),0.0);
+//    OW_mean = OW_mean/data_size;
+
+//    std::vector<double> OW_sqr(OW_valueset.size());
+//    std::transform(OW_valueset.begin(),OW_valueset.end(),OW_sqr.begin(),[OW_mean](double x) { return x - OW_mean; });
+//    double OW_std = std::inner_product(OW_sqr.begin(),OW_sqr.end(),OW_sqr.begin(), 0.0);
+//    OW_std = OW_std/data_size;
+////    double dynamic_threshold = (0.25*local_minimum)<-1.5?(0.25*local_minimum):-1.5;
+//    dynamic_threshold = (0.25*local_minimum);
+
+//    std::set<vtkIdType> ThisObjectsMemberPointIds;
+//    std::set<vtkIdType> CandidateNeigborCellIdsToProcess;
+//    std::set<vtkIdType> ThisObjectsCellIds;
+
+//    CandidateNeigborCellIdsToProcess.clear();
+//    ThisObjectsCellIds.clear();
+//    ThisObjectsMemberPointIds.clear();
+//    std::set<vtkIdType>::iterator it1;
+//    vtkIdType cellId;
+
+//    double MaxXDimValue = DBL_MIN;
+//    double MaxYDimValue = DBL_MIN;
+//    double MaxZDimValue = DBL_MIN;
+
+//    double MinXDimValue = DBL_MAX;
+//    double MinYDimValue = DBL_MAX;
+//    double MinZDimValue = DBL_MAX;
+
+//    vtkIdType minimum_Point_index = in_ds->FindPoint(local_min_X,local_min_Y,local_min_Z);
+
+//    vtkSmartPointer<vtkIdList> minimum_Cell_index = vtkSmartPointer<vtkIdList>::New();
+//    in_ds->GetPointCells(minimum_Point_index,minimum_Cell_index);
+//    int test = minimum_Cell_index->GetId(0);
+//    CandidateNeigborCellIdsToProcess.insert(minimum_Cell_index->GetId(0));
+
+//    while(CandidateNeigborCellIdsToProcess.size()>0)
+//    {
+
+//        it1 = CandidateNeigborCellIdsToProcess.begin();
+//        cellId = *it1; //CandidateNeigborCellIdsToProcess[0];
+//        CandidateNeigborCellIdsToProcess.erase (cellId);
+//        if(ProcessedCell_step2[(unsigned long)cellId] == false)
+//        {
+//            ProcessedCell_step2[(unsigned long)cellId] = true;
+//            vtkSmartPointer<vtkIdList> cellPointIds = vtkSmartPointer<vtkIdList>::New();
+//            in_ds->GetCellPoints(cellId, cellPointIds); //<--- this one gets the points of the current cell (cellId)
+//            for(vtkIdType j = 0; j < 8 ; j++) // for each cell point in this cell
+//            {
+//                vtkIdType pointindex = cellPointIds->GetId(j);
+//                double* temp_val_0;
+//                temp_val_0 = data->GetTuple(pointindex);
+
+
+
+//                // check whether we take the greater or smaller parts in the data...
+//                // Threshold must be positive
+//                bool testvalueForthisPoint = false;
+
+//                if (Greater)
+//                {
+//                    //cout<<"inside if"<<endl;
+//                    if(!Abs_value){
+//                        if(temp_val_0[0]>=dynamic_threshold)
+//                            testvalueForthisPoint = true;
+//                    }
+//                    else{
+//                        if(abs(temp_val_0[0])>=abs(dynamic_threshold))
+//                            testvalueForthisPoint = true;
+//                    }
+
+//                }
+//                else
+//                {
+//                    //cout<<"inside else"<<endl;
+//                    if(!Abs_value){
+//                        if (temp_val_0[0]<=dynamic_threshold)
+//                            testvalueForthisPoint = true;
+//                    }
+//                    else{
+//                        if (abs(temp_val_0[0])<=abs(dynamic_threshold))
+//                            testvalueForthisPoint = true;
+//                    }
+//                }
+
+
+//                if (testvalueForthisPoint) // we found a point.. :)
+//                {
+//                    //cout<<"inside the iftestvalue"<<endl;
+//                    //-----Find the bounding box of the object for filtering ---
+//                    if ( ThisDataType == 1) // do this computation only if you use it... :)
+//                    {
+//                    double *temp_coord3D = new double[3];
+//                    in_ds->GetPoint(pointindex,temp_coord3D);
+
+//                    if (temp_coord3D[0] > MaxXDimValue)
+//                        MaxXDimValue = temp_coord3D[0];
+
+//                    if (temp_coord3D[1] > MaxYDimValue)
+//                        MaxYDimValue = temp_coord3D[1];
+
+//                    if (temp_coord3D[2] > MaxZDimValue)
+//                        MaxZDimValue = temp_coord3D[2];
+
+
+
+//                    if (temp_coord3D[0] < MinXDimValue)
+//                        MinXDimValue = temp_coord3D[0];
+
+//                    if (temp_coord3D[1] < MinYDimValue)
+//                        MinYDimValue = temp_coord3D[1];
+
+
+//                    if (temp_coord3D[2] < MinZDimValue)
+//                        MinZDimValue = temp_coord3D[2];
+
+//                    delete[] temp_coord3D;
+//                    temp_coord3D = NULL;
+//                    }
+//                    //-----
+
+
+//                    // ThisObjectsCompleteCellIds.insert(cellId);
+//                    //ThisObjectsCellIds.push_back(cellId);
+//                    ThisObjectsCellIds.insert(cellId);
+//                    ThisObjectsMemberPointIds.insert(pointindex);
+//                    vtkSmartPointer<vtkIdList> thispointsCellIds = vtkSmartPointer<vtkIdList>::New();
+//                    in_ds-> GetPointCells(pointindex, thispointsCellIds);
+//                    for(vtkIdType k = 0; k < thispointsCellIds->GetNumberOfIds(); k++)
+//                    {
+//                        CandidateNeigborCellIdsToProcess.insert(thispointsCellIds->GetId(k));
+//                    }
+//                }
+//            }
+//        }
+//    }
+
+//    PointIdSet_Result = ThisObjectsMemberPointIds;
+//    CellIdSet_Result = ThisObjectsCellIds;
+
+
+//    for(std::set<vtkIdType>::iterator it=ThisObjectsMemberPointIds.begin(); it!=ThisObjectsMemberPointIds.end(); ++it){
+//        vtkIdType pointindex = *it;
+//        temp_val = data->GetTuple(pointindex);
+//        in_ds->GetPoint(pointindex,temp_coord3D);
+//        fprintf(fpout3,"%6lld %9.6f %9.6f %9.6f  %f %f %f %f\n", pointindex, (float) temp_coord3D[0], (float) temp_coord3D[1], (float) temp_coord3D[2], (float) temp_val[0], (float)temp_val[1],(float)temp_val[2],(float)temp_val[3]);
+
+//    }
+
+
+//    min_x = local_min_X;
+//    min_y = local_min_Y;
+//    min_z = local_min_Z;
+
+//    fclose(fpout3);
+//    delete[] temp_coord3D;
+//    temp_coord3D = NULL;
+
+
+//}
+
+
+//bool checkRotation4(const std::set<vtkIdType> &PointIdSet, const std::set<vtkIdType> &CellIdSet, vtkDataArray *data, vtkDataSet *in_ds, const double& Z_max, const double& Z_min, const string OutputOcdfile, bool& first_time, int currentTime, int ncomp, long &Uocd_objID,const int& OW_min_index, double centroidToplayer_x, double centroidToplayer_y){   //01/04/2021 By Weiping Hua
+
+
+////    // Initialization
+////    double *temp_coord3D = new double[3];
+////    std::set<vtkIdType> PointIdsResult;
+////    std::set<vtkIdType> CellIdSet_result;
+////    std::set<double> z_level;
+////    CellIdSet_result.clear();
+
+
+//////    Mat OW_map = Mat::zeros(500,500, CV_32FC1);
+
+////    double *temp_val;
+
+
+
+
+
+////    // Traverse every point in the top 5% layer for this object
+
+////    //Get the centroid
+
+
+////    double bounds[6];
+////    pointTop->GetBounds(bounds);
+
+
+////    // Find the four checking points(x,-x,y,-y)
+////    vtkNew<vtkPoints> intersectPoints;
+////    vtkNew<vtkPolyData>layer_top;
+////    layer_top->SetPoints(pointTop);
+
+////    double p0[3] = {bounds[0], centroidToplayer_y, *it_z};
+////    double p1[3] = {bounds[1], centroidToplayer_y, *it_z};
+////    double p2[3] = {centroidToplayer_x, bounds[2], *it_z};
+////    double p3[3] = {centroidToplayer_x, bounds[3], *it_z};
+
+////    vtkIdType cloest_id_0 = layer_top->FindPoint(p0[0],p0[1],p0[2]);
+////    vtkIdType cloest_id_1 = layer_top->FindPoint(p1[0],p1[1],p1[2]);
+////    vtkIdType cloest_id_2 = layer_top->FindPoint(p2[0],p2[1],p2[2]);
+////    vtkIdType cloest_id_3 = layer_top->FindPoint(p3[0],p3[1],p3[2]);
+
+////    double* point_in_ds_0 = new double[3];
+////    double* point_in_ds_1 = new double[3];
+////    double* point_in_ds_2 = new double[3];
+////    double* point_in_ds_3 = new double[3];
+
+////    layer_top->GetPoint(cloest_id_0, point_in_ds_0);
+////    layer_top->GetPoint(cloest_id_1, point_in_ds_1);
+////    layer_top->GetPoint(cloest_id_2, point_in_ds_2);
+////    layer_top->GetPoint(cloest_id_3, point_in_ds_3);
+
+////    cloest_id_0 = in_ds->FindPoint(point_in_ds_0[0],point_in_ds_0[1],point_in_ds_0[2]);
+////    cloest_id_1 = in_ds->FindPoint(point_in_ds_1[0],point_in_ds_1[1],point_in_ds_1[2]);
+////    cloest_id_2 = in_ds->FindPoint(point_in_ds_2[0],point_in_ds_2[1],point_in_ds_2[2]);
+////    cloest_id_3 = in_ds->FindPoint(point_in_ds_3[0],point_in_ds_3[1],point_in_ds_3[2]);
+
+
+//////    temp_val[1] and temp_val[2] are velocity in u and v directions
+
+
+////    temp_val = data->GetTuple(cloest_id_0);
+////    in_ds->GetPoint(cloest_id_0,temp_coord3D);
+
+////    float val_1 = (float)temp_val[1];
+////    float val_2 = (float)temp_val[2];
+
+
+
+////    temp_val = data->GetTuple(cloest_id_1);
+////    in_ds->GetPoint(cloest_id_1,temp_coord3D);
+
+////    float val_3 = (float)temp_val[1];
+////    float val_4 = (float)temp_val[2];
+
+////    bool eddy_flag_x_1 = (val_1*val_3<0)||(val_2*val_4<0);
+
+////    temp_val = data->GetTuple(cloest_id_2);
+////    in_ds->GetPoint(cloest_id_2,temp_coord3D);
+
+////    val_1 = (float)temp_val[1];
+////    val_2 = (float)temp_val[2];
+
+////    temp_val = data->GetTuple(cloest_id_3);
+////    in_ds->GetPoint(cloest_id_3,temp_coord3D);
+
+////    val_1 = (float)temp_val[1];
+////    val_2 = (float)temp_val[2];
+
+////    bool eddy_flag_x_2 = (val_1*val_3<0)||(val_2*val_4<0);
+
+////    if(eddy_flag_x_1 && eddy_flag_x_2){
+//////        for(std::set<vtkIdType>::iterator it=PointIdSet.begin(); it!=PointIdSet.end(); ++it){
+//////            vtkIdType pointindex = *it;
+//////            temp_val = data->GetTuple(pointindex);
+//////            in_ds->GetPoint(pointindex,temp_coord3D);
+//////            fprintf(fpout2,"%6lld %9.6f %9.6f %9.6f  %f %f %f %f\n", pointindex, (float) temp_coord3D[0], (float) temp_coord3D[1], (float) temp_coord3D[2], (float) temp_val[0], (float)temp_val[1],(float)temp_val[2],(float)temp_val[3]);
+//////        }
+//////        fclose(fpout2);
+////        delete[] temp_coord3D;
+////        delete[] point_in_ds_0;
+////        delete[] point_in_ds_1;
+////        delete[] point_in_ds_2;
+////        delete[] point_in_ds_3;
+////        return true;
+////    }
+////    else
+////    {
+//////        fclose(fpout2);
+////        delete[] temp_coord3D;
+////        delete[] point_in_ds_0;
+////        delete[] point_in_ds_1;
+////        delete[] point_in_ds_2;
+////        delete[] point_in_ds_3;
+////        return false;
+////    }
+
+
+
+
+
+//////    CellIdSet_Result.clear();
+//////    CellIdSet_Result = CellIdSet_result;
+
+//////    PointIdSet_Result.clear();
+//////    PointIdSet_Result = PointIdsResult;
+
+//////    PointIdSet_Result = PointIdSet;
+//////    CellIdSet_Result = CellIdSet;
+
+
+
+
+
+//////    delete[] temp_val;
+
+//}
+
+bool centroidsCompare(const pair<cv::Point2d,double>& center1, const pair<cv::Point2d,double>& center2){
+    if(center1.first.x<center2.first.x){
+        return true;
+    }
+    else if(center1.first.x==center2.first.x){
+        if(center1.first.y<center2.first.y){
+//            if(center1.second>=center2.second)
+                return true;
         }
+        else
+            return false;
+    }
+    else
+        return false;
+
+
+}
+
+bool pairsCompare(const pair<pair<int, int>,double>& pair1, const pair<pair<int, int>,double>& pair2){
+    if(pair1.first.first>pair2.first.first){
+        if(pair1.first.second>pair2.first.second){
+//            if(center1.second>=center2.second)
+                return false;
+        }
+    }
+
+//    if(center1.second>=center2.second){
+//            return false;
+//    }
+    return true;
+
+
+}
+
+bool createCircleBoundaryPoints(int center_x,int center_y, int radius, std::vector<pair<int,int>>& final){
+
+
+    double d=1.25-radius;
+    int x= 0;
+    int y = radius;
+    int cornerCoord;
+
+    std::vector<pair<int,int>> oneUp;
+    std::vector<pair<int,int>> oneDown;
+    std::vector<pair<int,int>> twoUp;
+    std::vector<pair<int,int>> twoDown;
+    std::vector<pair<int,int>> threeUp;
+    std::vector<pair<int,int>> threeDown;
+    std::vector<pair<int,int>> fourUp;
+    std::vector<pair<int,int>> fourDown;
+
+
+
+
+
+
+
+    oneUp.reserve(y-x);
+    oneDown.reserve(y-x);
+    twoUp.reserve(y-x);
+    twoDown.reserve(y-x);
+    threeUp.reserve(y-x);
+    threeDown.reserve(y-x);
+    fourDown.reserve(y-x);
+    fourUp.reserve(y-x);
+    final.reserve(8*fourUp.size()+4);
+
+
+
+
+    for(;x<y;++x){
+//        cout<<fourUp.capacity()<<endl;
+        oneUp.push_back(make_pair(x+center_x,y+center_y));
+        oneDown.push_back(make_pair(y+center_x,x+center_y));
+        twoUp.push_back(make_pair(-x+center_x,y+center_y));
+        twoDown.push_back(make_pair(-y+center_x,x+center_y));
+        threeUp.push_back(make_pair(-y+center_x,-x+center_y));
+        threeDown.push_back(make_pair(-x+center_x,-y+center_y));
+        fourUp.push_back(make_pair(y+center_x,-x+center_y));
+        fourDown.push_back(make_pair(x+center_x,-y+center_y));
+//        cout<<fourUp.capacity()<<endl;
+
+        if(d<=0)
+            d+=4*x+6;
+        else{
+
+            d+=4*(x-y)+10;
+            y--;
+        }
+    }
+
+    std::reverse(fourUp.begin(),fourUp.end());
+    std::reverse(oneUp.begin(),oneUp.end());
+    std::reverse(threeDown.begin(),threeDown.end());
+    std::reverse(twoDown.begin(),twoDown.end());
+
+
+    cornerCoord = round(radius/1.414214);
+
+    final.swap(fourDown);
+
+    final.push_back(make_pair(cornerCoord+center_x,-cornerCoord+center_y));
+    final.insert(final.end(),fourUp.begin(),fourUp.end());
+    final.insert(final.end(),oneDown.begin(),oneDown.end());
+    final.push_back(make_pair(cornerCoord+center_x,cornerCoord+center_y));
+    final.insert(final.end(),oneUp.begin(),oneUp.end());
+    final.insert(final.end(),twoUp.begin(),twoUp.end());
+    final.push_back(make_pair(-cornerCoord+center_x,cornerCoord+center_y));
+    final.insert(final.end(),twoDown.begin(),twoDown.end());
+    final.insert(final.end(),threeUp.begin(),threeUp.end());
+    final.push_back(make_pair(-cornerCoord+center_x,-cornerCoord+center_y));
+    final.insert(final.end(),threeDown.begin(),threeDown.end());
+    final.erase(unique(final.begin(),final.end()),final.end());
+    final.pop_back();
+
+    return true;
+}
+
+bool circleRotationCheck_onSurface(vtkDataSet *in_ds,const int boxCenter_x, const int boxCenter_y, const double centerZ_InDataset, const int circleRadius, double& maxVelocityMagDiff_inFunc, double& maxVelocityAngleDiff_inFunc, short& numPositiveDirectPoints_inFunc,short& firstFailSymmetry_inFunc,  double& symmetryFailValue_inFunc, short& firstFailDeadZone_inFunc, double& deadzoneFailValue_inFunc, short& failureReason_inFunc,shared_ptr<double[]> xCoord, shared_ptr<double[]> yCoord){
+//    failureReason: 0 - velocity=0(out of valid data); 1 - velocity difference too big; 2 - angle difference too big; 3 - positive direction difference (too big);
+//    4 - positive direction difference (more than limited pairs); 5 - Dead zone; 6 - symmetry
+    vector<pair<int,int>> box_points;
+    double boxPoint_current_x;
+    double boxPoint_current_y;
+    double boxPoint_next_x;
+    double boxPoint_next_y;
+    double boxPoint_current_index;
+    double boxPoint_next_index;
+    shared_ptr<double[]> boxPoint_current_data(new double[9]);
+    shared_ptr<double[]> boxPoint_next_data(new double[9]);
+    double angleDiff_previous = 0;
+    double angleDiff_current = 0;
+    bool box_checkingFailed = false;
+    bool rotationCheckingFailed = false;
+
+    double velocityMag_diff;
+    pair<int,int> boxPoint_current;
+    pair<int,int> boxPoint_next;
+    double data_xLength = dataset_xLength;
+    double data_yLength = dataset_yLength;
+
+    double velocityMag_current;
+    double velocityMag_next;
+    vector<double> velocity_recorder;
+
+
+
+    box_points.clear();
+    velocity_recorder.clear();
+
+    // The x and y below is tricky as vtk is different from openCV
+
+
+//            for(short search_xDir = 1; search_xDir<box_search_x-1; ++search_xDir){
+//                box_points.push_back(make_pair(boxCenter_x - (box_search_x-1)/2 + search_xDir, boxCenter_y - (box_search_x-1)/2));
+//            }
+//            for(short search_yDir = 1; search_yDir<box_search_y-1; ++search_yDir){
+//                box_points.push_back(make_pair(boxCenter_x - (box_search_x-1)/2 + box_search_x - 1, boxCenter_y - (box_search_x-1)/2 + search_yDir));
+//            }
+//            for(short search_xDir = 1; search_xDir<box_search_x-1; ++search_xDir){
+//                box_points.push_back(make_pair(boxCenter_x - (box_search_x-1)/2 + box_search_x - 1 - search_xDir, boxCenter_y - (box_search_x-1)/2 + box_search_y - 1));
+//            }
+//            for(short search_yDir = 1; search_yDir<box_search_y-1; ++search_yDir){
+//                box_points.push_back(make_pair(boxCenter_x - (box_search_x-1)/2, boxCenter_y - (box_search_x-1)/2 + box_search_y - 1 - search_yDir));
+//            }
+//            box_points.push_back(make_pair(boxCenter_x, boxCenter_y-3));
+//            box_points.push_back(make_pair(boxCenter_x+1, boxCenter_y-3));
+//            box_points.push_back(make_pair(boxCenter_x+2, boxCenter_y-2));
+//            box_points.push_back(make_pair(boxCenter_x+3, boxCenter_y-1));
+//            box_points.push_back(make_pair(boxCenter_x+3, boxCenter_y));
+//            box_points.push_back(make_pair(boxCenter_x+3, boxCenter_y+1));
+//            box_points.push_back(make_pair(boxCenter_x+2, boxCenter_y+2));
+//            box_points.push_back(make_pair(boxCenter_x+1, boxCenter_y+3));
+//            box_points.push_back(make_pair(boxCenter_x, boxCenter_y+3));
+//            box_points.push_back(make_pair(boxCenter_x-1, boxCenter_y+3));
+//            box_points.push_back(make_pair(boxCenter_x-2, boxCenter_y+2));
+//            box_points.push_back(make_pair(boxCenter_x-3, boxCenter_y+1));
+//            box_points.push_back(make_pair(boxCenter_x-3, boxCenter_y));
+//            box_points.push_back(make_pair(boxCenter_x-3, boxCenter_y-1));
+//            box_points.push_back(make_pair(boxCenter_x-2, boxCenter_y-2));
+//            box_points.push_back(make_pair(boxCenter_x-1, boxCenter_y-3));
+
+      createCircleBoundaryPoints(boxCenter_x,boxCenter_y, circleRadius, box_points);
+//    box_points = createCircleBoundaryPoints(0,0, 5);
+//      vector<pair<int,int>, double> filledCirclePoints;
+
+
+
+
+
+    short deviationFlag = 0;
+    int deviationMaximumCases = floor(circleRadius/5)+1;
+    bool clockwiseFlag = false;
+    double angle_current = 0;
+    double angle_next = 0;
+   vector<pair<int,int>>::iterator iter_BoxPoint = box_points.begin();
+    while(iter_BoxPoint != box_points.end()){
+        box_checkingFailed = false;
+        if(iter_BoxPoint == box_points.begin()){
+            boxPoint_current = *(iter_BoxPoint);
+            boxPoint_next = *(iter_BoxPoint+1);
+            boxPoint_current_x = xCoord[boxPoint_current.first];
+            boxPoint_current_y = yCoord[boxPoint_current.second];
+            boxPoint_next_x = xCoord[boxPoint_next.first];
+            boxPoint_next_y = yCoord[boxPoint_next.second];
+            boxPoint_current_index = in_ds->FindPoint(boxPoint_current_x,boxPoint_current_y,centerZ_InDataset);
+            in_ds->GetPointData()->GetTensors()->GetTuple(boxPoint_current_index,boxPoint_current_data.get());
+//            memcpy(boxPoint_current_data, in_ds->GetPointData()->GetTensors()->GetTuple(boxPoint_current_index),sizeof(double)*6);
+            boxPoint_next_index = in_ds->FindPoint(boxPoint_next_x, boxPoint_next_y,centerZ_InDataset);
+            in_ds->GetPointData()->GetTensors()->GetTuple(boxPoint_next_index,boxPoint_next_data.get());
+            angle_current = atan2(boxPoint_current_data[2],boxPoint_current_data[1]);
+            angle_next = atan2(boxPoint_next_data[2],boxPoint_next_data[1]);
+            angleDiff_current = angle_current - angle_next;
+            velocityMag_current =sqrt(pow(boxPoint_current_data[1],2)+pow(boxPoint_current_data[2],2));
+            velocityMag_next = sqrt(pow(boxPoint_next_data[1],2)+pow(boxPoint_next_data[2],2));
+            if(-M_PI/2<=atan2(boxPoint_current_data[2],boxPoint_current_data[1]) && atan2(boxPoint_current_data[2],boxPoint_current_data[1])<=M_PI/2)
+                clockwiseFlag = false;
+            else
+                clockwiseFlag = true;
+            if(angleDiff_current>M_PI)
+                angleDiff_current = angleDiff_current - (2*M_PI);
+            else if(angleDiff_current<-M_PI)
+                angleDiff_current+= angleDiff_current + (2*M_PI);
+            velocityMag_diff = fabs(velocityMag_current - velocityMag_next)/velocityMag_current;
+            maxVelocityMagDiff_inFunc = velocityMag_diff>maxVelocityMagDiff_inFunc?velocityMag_diff:maxVelocityMagDiff_inFunc;
+            maxVelocityAngleDiff_inFunc = fabs(angleDiff_current)>maxVelocityAngleDiff_inFunc?fabs(angleDiff_current):maxVelocityAngleDiff_inFunc;
+
+
+            if(velocityMag_current == 0){
+                box_checkingFailed = true;
+                failureReason_inFunc = 0;
+            }
+            else{
+                if(velocityMag_diff>2.75){
+                    box_checkingFailed = true;
+                    failureReason_inFunc = 1;
+                }
+
+            }
+
+            if(angleDiff_current>0){
+                ++deviationFlag;
+                numPositiveDirectPoints_inFunc++;
+            }
+
+
+            if(fabs(angleDiff_current)>M_PI*0.83333){
+                box_checkingFailed = true;
+                failureReason_inFunc = 2;
+            }
+            boxPoint_current_data.swap(boxPoint_next_data);
+
+            angleDiff_previous = angleDiff_current;
+        }
+        else if(iter_BoxPoint == box_points.end() - 1){
+            boxPoint_next = box_points.at(0);
+            boxPoint_next_x = xCoord[boxPoint_next.first];
+            boxPoint_next_y = yCoord[boxPoint_next.second];
+            boxPoint_next_index = in_ds->FindPoint(boxPoint_next_x, boxPoint_next_y,centerZ_InDataset);
+            in_ds->GetPointData()->GetTensors()->GetTuple(boxPoint_next_index,boxPoint_next_data.get());
+            velocityMag_current =sqrt(pow(boxPoint_current_data[1],2)+pow(boxPoint_current_data[2],2));
+            velocityMag_next = sqrt(pow(boxPoint_next_data[1],2)+pow(boxPoint_next_data[2],2));
+
+            angle_current = atan2(boxPoint_current_data[2],boxPoint_current_data[1]);
+            angle_next = atan2(boxPoint_next_data[2],boxPoint_next_data[1]);
+            angleDiff_current = angle_current - angle_next;
+            if(angleDiff_current>M_PI)
+                angleDiff_current = angleDiff_current - 2*M_PI;
+            else if(angleDiff_current<-M_PI)
+                angleDiff_current+= angleDiff_current + 2*M_PI ;
+            velocityMag_diff = fabs(velocityMag_current - velocityMag_next)/velocityMag_current;
+            maxVelocityMagDiff_inFunc = velocityMag_diff>maxVelocityMagDiff_inFunc?velocityMag_diff:maxVelocityMagDiff_inFunc;
+            maxVelocityAngleDiff_inFunc = fabs(angleDiff_current)>maxVelocityAngleDiff_inFunc?fabs(angleDiff_current):maxVelocityAngleDiff_inFunc;
+
+
+            if(velocityMag_current == 0){
+                box_checkingFailed = true;
+                failureReason_inFunc = 0;
+            }
+            else{
+                if(velocityMag_diff>2.75){
+                    box_checkingFailed = true;
+                    failureReason_inFunc = 1;
+                }
+            }
+            if(fabs(angleDiff_current)>M_PI*0.83333){
+                box_checkingFailed = true;
+                failureReason_inFunc = 2;
+            }
+
+            if(deviationFlag == 0){
+                if(angleDiff_current*angleDiff_previous<0){
+                    numPositiveDirectPoints_inFunc++;
+                    if(fabs(angleDiff_current)<M_PI/8){
+                        box_checkingFailed = false;
+                        ++deviationFlag;
+
+
+
+                        angleDiff_previous = angleDiff_current;
+                        boxPoint_next = box_points.at(1);
+                        boxPoint_next_x = xCoord[boxPoint_next.first];
+                        boxPoint_next_y = yCoord[boxPoint_next.second];
+                        boxPoint_next_index = in_ds->FindPoint(boxPoint_next_x, boxPoint_next_y,centerZ_InDataset);
+                        in_ds->GetPointData()->GetTensors()->GetTuple(boxPoint_next_index,boxPoint_next_data.get());
+                        velocityMag_current =sqrt(pow(boxPoint_current_data[1],2)+pow(boxPoint_current_data[2],2));
+                        velocityMag_next = sqrt(pow(boxPoint_next_data[1],2)+pow(boxPoint_next_data[2],2));
+
+                        angle_current = atan2(boxPoint_current_data[2],boxPoint_current_data[1]);
+                        angle_next = atan2(boxPoint_next_data[2],boxPoint_next_data[1]);
+                        angleDiff_current = angle_current - angle_next;
+                        if(angleDiff_current>M_PI)
+                            angleDiff_current = angleDiff_current - 2*M_PI;
+                        else if(angleDiff_current<-M_PI)
+                            angleDiff_current+= angleDiff_current + 2*M_PI ;
+                        if(angleDiff_current*angleDiff_previous<0){
+                            box_checkingFailed = false;
+                            deviationFlag = 0;
+                        }
+                        else{
+                            numPositiveDirectPoints_inFunc++;
+                            box_checkingFailed = true;
+                            failureReason_inFunc = 4;
+                        }
+
+                    }
+                    else{
+                        box_checkingFailed = true;
+                        failureReason_inFunc = 3;
+                    }
+                }
+            }
+            else if(deviationFlag >= 1 && deviationFlag <= deviationMaximumCases){
+                if(angleDiff_current*angleDiff_previous<0){
+                    box_checkingFailed = false;
+                    deviationFlag = 0;
+                }
+                else{
+                    numPositiveDirectPoints_inFunc++;
+                    if(fabs(angleDiff_current)<M_PI/8){
+                        box_checkingFailed = false;
+
+
+
+                    }
+                    else{
+                        box_checkingFailed = true;
+                        failureReason_inFunc = 3;
+                    }
+                }
+            }
+            else{
+                if(angleDiff_current*angleDiff_previous<0){
+                    box_checkingFailed = false;
+                    deviationFlag = 0;
+                }
+                else{
+                    numPositiveDirectPoints_inFunc++;
+                    box_checkingFailed = true;
+                    failureReason_inFunc = 4;
+                }
+            }
+        }
+        else if(iter_BoxPoint != box_points.end() - 1){
+            boxPoint_next = *(iter_BoxPoint+1);
+            boxPoint_next_x = xCoord[boxPoint_next.first];
+            boxPoint_next_y = yCoord[boxPoint_next.second];
+            boxPoint_next_index = in_ds->FindPoint(boxPoint_next_x, boxPoint_next_y,centerZ_InDataset);
+            in_ds->GetPointData()->GetTensors()->GetTuple(boxPoint_next_index,boxPoint_next_data.get());
+            velocityMag_current =sqrt(pow(boxPoint_current_data[1],2)+pow(boxPoint_current_data[2],2));
+            velocityMag_next = sqrt(pow(boxPoint_next_data[1],2)+pow(boxPoint_next_data[2],2));
+            angle_current = atan2(boxPoint_current_data[2],boxPoint_current_data[1]);
+            angle_next = atan2(boxPoint_next_data[2],boxPoint_next_data[1]);
+            angleDiff_current = angle_current - angle_next;
+            if(angleDiff_current>M_PI)
+                angleDiff_current = angleDiff_current - 2*M_PI;
+            else if(angleDiff_current<-M_PI)
+                angleDiff_current+= angleDiff_current + 2*M_PI ;
+            velocityMag_diff = fabs(velocityMag_current - velocityMag_next)/velocityMag_current;
+            maxVelocityMagDiff_inFunc = velocityMag_diff>maxVelocityMagDiff_inFunc?velocityMag_diff:maxVelocityMagDiff_inFunc;
+            maxVelocityAngleDiff_inFunc = fabs(angleDiff_current)>maxVelocityAngleDiff_inFunc?fabs(angleDiff_current):maxVelocityAngleDiff_inFunc;
+
+
+            if(velocityMag_current == 0){
+                box_checkingFailed = true;
+                failureReason_inFunc = 0;
+            }
+            else{
+                if(velocityMag_diff>2.75){
+                    box_checkingFailed = true;
+                    failureReason_inFunc = 1;
+                }
+            }
+            if(fabs(angleDiff_current)>M_PI*0.83333){
+                box_checkingFailed = true;
+                failureReason_inFunc = 2;
+            }
+
+
+
+            if(deviationFlag == 0){
+                if(angleDiff_current*angleDiff_previous<0){
+                    numPositiveDirectPoints_inFunc++;
+                    if(fabs(angleDiff_current)<M_PI/8){
+                        box_checkingFailed = false;
+                        ++deviationFlag;
+                    }
+                    else{
+                        box_checkingFailed = true;
+                        failureReason_inFunc = 3;
+                    }
+                }
+            }
+            else if(deviationFlag >= 1 && deviationFlag <= deviationMaximumCases){
+                if(angleDiff_current*angleDiff_previous<0){
+                    box_checkingFailed = false;
+                    deviationFlag = 0;
+                }
+                else{
+                    numPositiveDirectPoints_inFunc++;
+                    if(fabs(angleDiff_current)<M_PI/8){
+                        box_checkingFailed = false;
+                        ++deviationFlag;
+                    }
+                    else{
+                        box_checkingFailed = true;
+                        failureReason_inFunc = 3;
+                    }
+                }
+            }
+            else{
+                if(angleDiff_current*angleDiff_previous<0){
+                    box_checkingFailed = false;
+                    deviationFlag = 0;
+                }
+                else{
+                    numPositiveDirectPoints_inFunc++;
+                    box_checkingFailed = true;
+                    failureReason_inFunc = 4;
+                }
+            }
+
+
+            boxPoint_current_data.swap(boxPoint_next_data);
+            angleDiff_previous = angleDiff_current;
+        }
+        else
+            cout<<"error in checking box"<<endl;
+        velocity_recorder.push_back(velocityMag_current);
+
+        if(boxPoint_next == box_points.at(box_points.size()/8))
+            if(angle_next< -M_PI/6 && angle_next>-M_PI/3){
+                box_checkingFailed = true;
+                firstFailDeadZone_inFunc = box_points.size()/8;
+                deadzoneFailValue_inFunc = angle_next;
+                failureReason_inFunc = 5;
+            }
+        if(boxPoint_next == box_points.at(box_points.size()/8+box_points.size()/4))
+            if(angle_next> M_PI/6 && angle_next<M_PI/3){
+                box_checkingFailed = true;
+                firstFailDeadZone_inFunc = box_points.size()/8+box_points.size()/4;
+                deadzoneFailValue_inFunc = angle_next;
+                failureReason_inFunc = 5;
+            }
+        if(boxPoint_next == box_points.at(box_points.size()/8+2*box_points.size()/4))
+            if(angle_next< 5*M_PI/6 && angle_next>2*M_PI/3){
+                box_checkingFailed = true;
+                firstFailDeadZone_inFunc = box_points.size()/8+2*box_points.size()/4;
+                deadzoneFailValue_inFunc = angle_next;
+                failureReason_inFunc = 5;
+            }
+        if(boxPoint_next == box_points.at(box_points.size()/8+3*box_points.size()/4))
+            if(angle_next< -2*M_PI/3 && angle_next>-5*M_PI/6){
+                box_checkingFailed = true;
+                firstFailDeadZone_inFunc = box_points.size()/8+3*box_points.size()/4;
+                deadzoneFailValue_inFunc = angle_next;
+                failureReason_inFunc = 5;
+            }
+
+
+
+
+        if(box_checkingFailed == true){
+            rotationCheckingFailed = true;
+            break;
+        }
+        iter_BoxPoint++;
+    }
+
+    if(rotationCheckingFailed == true){
+
+
+//        delete[] boxPoint_current_data;
+//        delete[] boxPoint_next_data;
+        return rotationCheckingFailed;
+    }
+
+
+    // We use the same variable here for convenience, actually this is checking the symmetric of the velocity
+    iter_BoxPoint = box_points.begin();
+    vector<pair<int,int>>::iterator iter_BoxPoint_latterHalf = box_points.begin()+box_points.size()/2;
+    int i = 0;
+    while(i< box_points.size()/2){
+        boxPoint_current = *(iter_BoxPoint);
+        boxPoint_next = *(iter_BoxPoint_latterHalf);
+        boxPoint_current_x = xCoord[boxPoint_current.first];
+        boxPoint_current_y = yCoord[boxPoint_current.second];
+        boxPoint_next_x = xCoord[boxPoint_next.first];
+        boxPoint_next_y = yCoord[boxPoint_next.second];
+        boxPoint_current_index = in_ds->FindPoint(boxPoint_current_x,boxPoint_current_y,centerZ_InDataset);
+        in_ds->GetPointData()->GetTensors()->GetTuple(boxPoint_current_index,boxPoint_current_data.get());
+        boxPoint_next_index = in_ds->FindPoint(boxPoint_next_x, boxPoint_next_y,centerZ_InDataset);
+        in_ds->GetPointData()->GetTensors()->GetTuple(boxPoint_next_index,boxPoint_next_data.get());
+
+
+        angle_current = atan2(boxPoint_current_data[2],boxPoint_current_data[1]);
+        angle_next = atan2(boxPoint_next_data[2],boxPoint_next_data[1]);
+        angleDiff_current = angle_current - angle_next;
+        if(angleDiff_current>M_PI)
+            angleDiff_current = 2*M_PI - angleDiff_current ;
+        else if(angleDiff_current<-M_PI)
+            angleDiff_current = 2*M_PI + angleDiff_current;
+
+        if(((fabs(angleDiff_current)<5*M_PI/3 && fabs(angleDiff_current)>M_PI/3) || (fabs(angleDiff_current)<-M_PI/3 && fabs(angleDiff_current)>-5*M_PI/3))== false){
+            firstFailSymmetry_inFunc = i;
+            symmetryFailValue_inFunc = angleDiff_current;
+            rotationCheckingFailed = true;
+            failureReason_inFunc = 6;
+            break;
+        }
+
+        i++;
+        iter_BoxPoint++;
+        iter_BoxPoint_latterHalf++;
     }
 
 
 
 
+//    delete[] boxPoint_current_data;
+//    delete[] boxPoint_next_data;
+    return rotationCheckingFailed;
+}
 
-//    CellIdSet.clear();
-//    CellIdSet = CellIdSet_result;
 
-//    PointIdSet.clear();
-//    PointIdSet = PointIdsResult;
-    fclose(fpout2);
+
+bool circleRotationCheck(vtkDataSet *in_ds,const int boxCenter_x, const int boxCenter_y, const double centerZ_InDataset, const int circleRadius, double& maxVelocityMagDiff_inFunc, double& maxVelocityAngleDiff_inFunc, short& numPositiveDirectPoints_inFunc,short& firstFailSymmetry_inFunc,  double& symmetryFailValue_inFunc, short& firstFailDeadZone_inFunc, double& deadzoneFailValue_inFunc, vector<pair<int,double>> (&failureReason_inFunc), vector<pair<int,int>>& boxPointsInloop,shared_ptr<double[]> xCoord, shared_ptr<double[]> yCoord, vector<bool>& clockwiseFlag, bool testEddyFlag){
+//    failureReason: 0 - velocity=0(out of valid data); 1 - velocity difference too big; 2 - angle difference too big; 3 - positive direction difference (too big);
+//    4 - positive direction difference (more than limited pairs); 5 - Dead zone; 6 - symmetry
+
+    double boxPoint_current_x;
+    double boxPoint_current_y;
+    double boxPoint_next_x;
+    double boxPoint_next_y;
+    double boxPoint_current_index;
+    double boxPoint_next_index;
+    shared_ptr<double[]> boxPoint_current_data(new double[9]);
+    shared_ptr<double[]> boxPoint_next_data(new double[9]);
+    double angleDiff_previous = 0;
+    double angleDiff_current = 0;
+    bool box_checkingFailed = false;
+    bool rotationCheckingFailed = false;
+
+    double velocityMag_diff;
+    pair<int,int> boxPoint_current;
+    pair<int,int> boxPoint_next;
+    double data_xLength = dataset_xLength;
+    double data_yLength = dataset_yLength;
+
+    double velocityMag_current;
+    double velocityMag_next;
+    vector<double> velocity_recorder;
+
+
+    in_ds->GetBounds(bounds);
+
+    double velMagDiffRatio=4;
+    double velAngleDiff_Thresh = 0.75;
+    int deviationMaximumCases = floor(circleRadius/5)+1;
+    double deviationMaximumDegree = 0.1*M_PI;
+    double deadZoneAngle = 0.1*M_PI;
+    double symmetricAngle = 3*M_PI/4;
+
+
+
+    velocity_recorder.clear();
+
+    // The x and y below is tricky as vtk is different from openCV
+
+
+//            for(short search_xDir = 1; search_xDir<box_search_x-1; ++search_xDir){
+//                box_points.push_back(make_pair(boxCenter_x - (box_search_x-1)/2 + search_xDir, boxCenter_y - (box_search_x-1)/2));
+//            }
+//            for(short search_yDir = 1; search_yDir<box_search_y-1; ++search_yDir){
+//                box_points.push_back(make_pair(boxCenter_x - (box_search_x-1)/2 + box_search_x - 1, boxCenter_y - (box_search_x-1)/2 + search_yDir));
+//            }
+//            for(short search_xDir = 1; search_xDir<box_search_x-1; ++search_xDir){
+//                box_points.push_back(make_pair(boxCenter_x - (box_search_x-1)/2 + box_search_x - 1 - search_xDir, boxCenter_y - (box_search_x-1)/2 + box_search_y - 1));
+//            }
+//            for(short search_yDir = 1; search_yDir<box_search_y-1; ++search_yDir){
+//                box_points.push_back(make_pair(boxCenter_x - (box_search_x-1)/2, boxCenter_y - (box_search_x-1)/2 + box_search_y - 1 - search_yDir));
+//            }
+//            box_points.push_back(make_pair(boxCenter_x, boxCenter_y-3));
+//            box_points.push_back(make_pair(boxCenter_x+1, boxCenter_y-3));
+//            box_points.push_back(make_pair(boxCenter_x+2, boxCenter_y-2));
+//            box_points.push_back(make_pair(boxCenter_x+3, boxCenter_y-1));
+//            box_points.push_back(make_pair(boxCenter_x+3, boxCenter_y));
+//            box_points.push_back(make_pair(boxCenter_x+3, boxCenter_y+1));
+//            box_points.push_back(make_pair(boxCenter_x+2, boxCenter_y+2));
+//            box_points.push_back(make_pair(boxCenter_x+1, boxCenter_y+3));
+//            box_points.push_back(make_pair(boxCenter_x, boxCenter_y+3));
+//            box_points.push_back(make_pair(boxCenter_x-1, boxCenter_y+3));
+//            box_points.push_back(make_pair(boxCenter_x-2, boxCenter_y+2));
+//            box_points.push_back(make_pair(boxCenter_x-3, boxCenter_y+1));
+//            box_points.push_back(make_pair(boxCenter_x-3, boxCenter_y));
+//            box_points.push_back(make_pair(boxCenter_x-3, boxCenter_y-1));
+//            box_points.push_back(make_pair(boxCenter_x-2, boxCenter_y-2));
+//            box_points.push_back(make_pair(boxCenter_x-1, boxCenter_y-3));
+
+      createCircleBoundaryPoints(boxCenter_x,boxCenter_y, circleRadius, boxPointsInloop);
+//    box_points = createCircleBoundaryPoints(0,0, 5);
+//      vector<pair<int,int>, double> filledCirclePoints;
+
+
+
+
+
+
+    short deviationFlag = 0;
+    pair<double, double>velMagDiff_Thresh = make_pair(1/velMagDiffRatio,velMagDiffRatio);
+    double angle_current = 0;
+    double angle_next = 0;
+    vector<pair<double,double>> Vel;
+    vector<pair<double,double>> Coord;
+    vector<pair<int,int>>::iterator iter_BoxPoint = boxPointsInloop.begin();
+    while(iter_BoxPoint != boxPointsInloop.end()){
+        box_checkingFailed = false;
+        if(iter_BoxPoint == boxPointsInloop.begin()){
+            boxPoint_current = *(iter_BoxPoint);
+            boxPoint_next = *(iter_BoxPoint+1);
+            boxPoint_current_x = xCoord[boxPoint_current.first];
+            boxPoint_current_y = yCoord[boxPoint_current.second];
+            boxPoint_next_x = xCoord[boxPoint_next.first];
+            boxPoint_next_y = yCoord[boxPoint_next.second];
+            boxPoint_current_index = in_ds->FindPoint(boxPoint_current_x,boxPoint_current_y,centerZ_InDataset);
+            in_ds->GetPointData()->GetTensors()->GetTuple(boxPoint_current_index,boxPoint_current_data.get());
+//            memcpy(boxPoint_current_data, in_ds->GetPointData()->GetTensors()->GetTuple(boxPoint_current_index),sizeof(double)*6);
+            boxPoint_next_index = in_ds->FindPoint(boxPoint_next_x, boxPoint_next_y,centerZ_InDataset);
+            in_ds->GetPointData()->GetTensors()->GetTuple(boxPoint_next_index,boxPoint_next_data.get());
+
+
+            angle_current = atan2(boxPoint_current_data[2],boxPoint_current_data[1]);
+            angle_next = atan2(boxPoint_next_data[2],boxPoint_next_data[1]);
+            angleDiff_current = angle_current - angle_next;
+            velocityMag_current =sqrt(pow(boxPoint_current_data[1],2)+pow(boxPoint_current_data[2],2));
+            velocityMag_next = sqrt(pow(boxPoint_next_data[1],2)+pow(boxPoint_next_data[2],2));
+
+
+
+            if(-M_PI/2<=atan2(boxPoint_current_data[2],boxPoint_current_data[1]) && atan2(boxPoint_current_data[2],boxPoint_current_data[1])<=M_PI/2)
+                clockwiseFlag.push_back(false);
+            else
+                clockwiseFlag.push_back(true);
+            if(angleDiff_current>M_PI)
+                angleDiff_current = angleDiff_current - (2*M_PI);
+            else if(angleDiff_current<-M_PI)
+                angleDiff_current+= angleDiff_current + (2*M_PI);
+            velocityMag_diff = fabs(velocityMag_next/velocityMag_current);
+            maxVelocityMagDiff_inFunc = velocityMag_diff>maxVelocityMagDiff_inFunc?velocityMag_diff:maxVelocityMagDiff_inFunc;
+            maxVelocityAngleDiff_inFunc = fabs(angleDiff_current)>maxVelocityAngleDiff_inFunc?fabs(angleDiff_current):maxVelocityAngleDiff_inFunc;
+
+
+            if(velocityMag_current == 0){
+                box_checkingFailed = true;
+                failureReason_inFunc.push_back(make_pair(0,0));
+            }
+            else{
+                if(velocityMag_diff>velMagDiff_Thresh.second|| velocityMag_diff<velMagDiff_Thresh.first){
+                    box_checkingFailed = true;
+                    failureReason_inFunc.push_back(make_pair(1,velocityMag_diff));
+                }
+
+            }
+
+            if(angleDiff_current>0){
+                ++deviationFlag;
+                numPositiveDirectPoints_inFunc++;
+            }
+
+
+            if(fabs(angleDiff_current)>M_PI*velAngleDiff_Thresh){
+                box_checkingFailed = true;
+                failureReason_inFunc.push_back(make_pair(2,fabs(angleDiff_current)));
+            }
+            boxPoint_current_data.swap(boxPoint_next_data);
+
+            angleDiff_previous = angleDiff_current;
+            boxPoint_current_x = boxPoint_next_x;
+            boxPoint_current_y = boxPoint_next_y;
+        }
+        else if(iter_BoxPoint == boxPointsInloop.end() - 1){
+            boxPoint_next = boxPointsInloop.at(0);
+            boxPoint_next_x = xCoord[boxPoint_next.first];
+            boxPoint_next_y = yCoord[boxPoint_next.second];
+            boxPoint_next_index = in_ds->FindPoint(boxPoint_next_x, boxPoint_next_y,centerZ_InDataset);
+            in_ds->GetPointData()->GetTensors()->GetTuple(boxPoint_next_index,boxPoint_next_data.get());
+            velocityMag_current =sqrt(pow(boxPoint_current_data[1],2)+pow(boxPoint_current_data[2],2));
+            velocityMag_next = sqrt(pow(boxPoint_next_data[1],2)+pow(boxPoint_next_data[2],2));
+
+            angle_current = atan2(boxPoint_current_data[2],boxPoint_current_data[1]);
+            angle_next = atan2(boxPoint_next_data[2],boxPoint_next_data[1]);
+            angleDiff_current = angle_current - angle_next;
+            if(angleDiff_current>M_PI)
+                angleDiff_current = angleDiff_current - 2*M_PI;
+            else if(angleDiff_current<-M_PI)
+                angleDiff_current+= angleDiff_current + 2*M_PI ;
+            velocityMag_diff = fabs(velocityMag_next/velocityMag_current);
+            maxVelocityMagDiff_inFunc = velocityMag_diff>maxVelocityMagDiff_inFunc?velocityMag_diff:maxVelocityMagDiff_inFunc;
+            maxVelocityAngleDiff_inFunc = fabs(angleDiff_current)>maxVelocityAngleDiff_inFunc?fabs(angleDiff_current):maxVelocityAngleDiff_inFunc;
+
+
+            if(velocityMag_current == 0){
+                box_checkingFailed = true;
+                failureReason_inFunc.push_back(make_pair(0,0));
+            }
+            else{
+                if(velocityMag_diff>velMagDiff_Thresh.second|| velocityMag_diff<velMagDiff_Thresh.first){
+                    box_checkingFailed = true;
+                    failureReason_inFunc.push_back(make_pair(1,velocityMag_diff));
+                }
+            }
+            if(fabs(angleDiff_current)>M_PI*velAngleDiff_Thresh){
+                box_checkingFailed = true;
+                failureReason_inFunc.push_back(make_pair(2,fabs(angleDiff_current)));
+            }
+
+            if(deviationFlag == 0){
+                if(angleDiff_current*angleDiff_previous<0){
+                    numPositiveDirectPoints_inFunc++;
+                    if(fabs(angleDiff_current)<deviationMaximumDegree){
+                        box_checkingFailed = false;
+                        ++deviationFlag;
+
+
+
+                        angleDiff_previous = angleDiff_current;
+                        boxPoint_next = boxPointsInloop.at(1);
+                        boxPoint_next_x = xCoord[boxPoint_next.first];
+                        boxPoint_next_y = yCoord[boxPoint_next.second];
+                        boxPoint_next_index = in_ds->FindPoint(boxPoint_next_x, boxPoint_next_y,centerZ_InDataset);
+                        in_ds->GetPointData()->GetTensors()->GetTuple(boxPoint_next_index,boxPoint_next_data.get());
+                        velocityMag_current =sqrt(pow(boxPoint_current_data[1],2)+pow(boxPoint_current_data[2],2));
+                        velocityMag_next = sqrt(pow(boxPoint_next_data[1],2)+pow(boxPoint_next_data[2],2));
+
+                        angle_current = atan2(boxPoint_current_data[2],boxPoint_current_data[1]);
+                        angle_next = atan2(boxPoint_next_data[2],boxPoint_next_data[1]);
+                        angleDiff_current = angle_current - angle_next;
+                        if(angleDiff_current>M_PI)
+                            angleDiff_current = angleDiff_current - 2*M_PI;
+                        else if(angleDiff_current<-M_PI)
+                            angleDiff_current+= angleDiff_current + 2*M_PI ;
+                        if(angleDiff_current*angleDiff_previous<0){
+                            box_checkingFailed = false;
+                            deviationFlag = 0;
+                        }
+                        else{
+                            numPositiveDirectPoints_inFunc++;
+                            box_checkingFailed = true;
+                            failureReason_inFunc.push_back(make_pair(4,-1));
+                        }
+
+                    }
+                    else{
+                        box_checkingFailed = true;
+                        failureReason_inFunc.push_back(make_pair(3,fabs(angleDiff_current)));
+                    }
+                }
+            }
+            else if(deviationFlag >= 1 && deviationFlag <= deviationMaximumCases){
+                if(angleDiff_current*angleDiff_previous<0){
+                    box_checkingFailed = false;
+                    deviationFlag = 0;
+                }
+                else{
+                    numPositiveDirectPoints_inFunc++;
+                    if(fabs(angleDiff_current)<deviationMaximumDegree){
+                        box_checkingFailed = false;
+
+
+
+                    }
+                    else{
+                        box_checkingFailed = true;
+                        failureReason_inFunc.push_back(make_pair(3,fabs(angleDiff_current)));
+                    }
+                }
+            }
+            else{
+                if(angleDiff_current*angleDiff_previous<0){
+                    box_checkingFailed = false;
+                    deviationFlag = 0;
+                }
+                else{
+                    numPositiveDirectPoints_inFunc++;
+                    box_checkingFailed = true;
+                    failureReason_inFunc.push_back(make_pair(4,-1));
+                }
+            }
+        }
+        else if(iter_BoxPoint != boxPointsInloop.end() - 1){
+            boxPoint_next = *(iter_BoxPoint+1);
+            boxPoint_next_x = xCoord[boxPoint_next.first];
+            boxPoint_next_y = yCoord[boxPoint_next.second];
+            boxPoint_next_index = in_ds->FindPoint(boxPoint_next_x, boxPoint_next_y,centerZ_InDataset);
+            in_ds->GetPointData()->GetTensors()->GetTuple(boxPoint_next_index,boxPoint_next_data.get());
+            velocityMag_current =sqrt(pow(boxPoint_current_data[1],2)+pow(boxPoint_current_data[2],2));
+            velocityMag_next = sqrt(pow(boxPoint_next_data[1],2)+pow(boxPoint_next_data[2],2));
+            angle_current = atan2(boxPoint_current_data[2],boxPoint_current_data[1]);
+            angle_next = atan2(boxPoint_next_data[2],boxPoint_next_data[1]);
+            angleDiff_current = angle_current - angle_next;
+            if(angleDiff_current>M_PI)
+                angleDiff_current = angleDiff_current - 2*M_PI;
+            else if(angleDiff_current<-M_PI)
+                angleDiff_current+= angleDiff_current + 2*M_PI ;
+            velocityMag_diff = fabs(velocityMag_next/velocityMag_current);
+            maxVelocityMagDiff_inFunc = velocityMag_diff>maxVelocityMagDiff_inFunc?velocityMag_diff:maxVelocityMagDiff_inFunc;
+            maxVelocityAngleDiff_inFunc = fabs(angleDiff_current)>maxVelocityAngleDiff_inFunc?fabs(angleDiff_current):maxVelocityAngleDiff_inFunc;
+
+
+            if(velocityMag_current == 0){
+                box_checkingFailed = true;
+                failureReason_inFunc.push_back(make_pair(0,0));
+            }
+            else{
+                if(velocityMag_diff>velMagDiff_Thresh.second || velocityMag_diff<velMagDiff_Thresh.first){
+                    box_checkingFailed = true;
+                    failureReason_inFunc.push_back(make_pair(1,velocityMag_diff));
+                }
+            }
+            if(fabs(angleDiff_current)>M_PI*velAngleDiff_Thresh){
+                box_checkingFailed = true;
+                failureReason_inFunc.push_back(make_pair(2,fabs(angleDiff_current)));
+            }
+
+
+
+            if(deviationFlag == 0){
+                if(angleDiff_current*angleDiff_previous<0){
+                    numPositiveDirectPoints_inFunc++;
+                    if(fabs(angleDiff_current)<deviationMaximumDegree){
+                        box_checkingFailed = false;
+                        ++deviationFlag;
+                    }
+                    else{
+                        box_checkingFailed = true;
+                        failureReason_inFunc.push_back(make_pair(3,fabs(angleDiff_current)));
+                    }
+                }
+            }
+            else if(deviationFlag >= 1 && deviationFlag <= deviationMaximumCases){
+                if(angleDiff_current*angleDiff_previous<0){
+                    box_checkingFailed = false;
+                    deviationFlag = 0;
+                }
+                else{
+                    numPositiveDirectPoints_inFunc++;
+                    if(fabs(angleDiff_current)<deviationMaximumDegree){
+                        box_checkingFailed = false;
+                        ++deviationFlag;
+                    }
+                    else{
+                        box_checkingFailed = true;
+                        failureReason_inFunc.push_back(make_pair(3,fabs(angleDiff_current)));
+                    }
+                }
+            }
+            else{
+                if(angleDiff_current*angleDiff_previous<0){
+                    box_checkingFailed = false;
+                    deviationFlag = 0;
+                }
+                else{
+                    numPositiveDirectPoints_inFunc++;
+                    box_checkingFailed = true;
+                    failureReason_inFunc.push_back(make_pair(4,-1));
+                }
+            }
+
+
+            boxPoint_current_data.swap(boxPoint_next_data);
+            angleDiff_previous = angleDiff_current;
+        }
+        else
+            cout<<"error in checking box"<<endl;
+        velocity_recorder.push_back(velocityMag_current);
+
+        if(boxPoint_next == boxPointsInloop.at(boxPointsInloop.size()/8))
+            if(angle_next< (-M_PI/4+deadZoneAngle) && angle_next>(-M_PI/4-deadZoneAngle)){
+                box_checkingFailed = true;
+                firstFailDeadZone_inFunc = boxPointsInloop.size()/8;
+                deadzoneFailValue_inFunc = angle_next;
+                failureReason_inFunc.push_back(make_pair(5,angle_next));
+            }
+        if(boxPoint_next == boxPointsInloop.at(boxPointsInloop.size()/8+boxPointsInloop.size()/4))
+            if(angle_next> (M_PI/4-deadZoneAngle) && angle_next<(M_PI/4+deadZoneAngle)){
+                box_checkingFailed = true;
+                firstFailDeadZone_inFunc = boxPointsInloop.size()/8+boxPointsInloop.size()/4;
+                deadzoneFailValue_inFunc = angle_next;
+                failureReason_inFunc.push_back(make_pair(5,angle_next));
+            }
+        if(boxPoint_next == boxPointsInloop.at(boxPointsInloop.size()/8+2*boxPointsInloop.size()/4))
+            if(angle_next< (3*M_PI/4+deadZoneAngle) && angle_next>(3*M_PI/4-deadZoneAngle)){
+                box_checkingFailed = true;
+                firstFailDeadZone_inFunc = boxPointsInloop.size()/8+2*boxPointsInloop.size()/4;
+                deadzoneFailValue_inFunc = angle_next;
+                failureReason_inFunc.push_back(make_pair(5,angle_next));
+            }
+        if(boxPoint_next == boxPointsInloop.at(boxPointsInloop.size()/8+3*boxPointsInloop.size()/4))
+            if(angle_next< -(3*M_PI/4-deadZoneAngle) && angle_next>-(3*M_PI/4+deadZoneAngle)){
+                box_checkingFailed = true;
+                firstFailDeadZone_inFunc = boxPointsInloop.size()/8+3*boxPointsInloop.size()/4;
+                deadzoneFailValue_inFunc = angle_next;
+                failureReason_inFunc.push_back(make_pair(5,angle_next));
+            }
+
+
+
+
+        if(box_checkingFailed == true){
+            rotationCheckingFailed = true;
+//            break;
+        }
+        iter_BoxPoint++;
+
+        Vel.push_back(make_pair(boxPoint_current_data[1],boxPoint_current_data[2]));
+        Coord.push_back(make_pair(boxPoint_next_x,boxPoint_next_y));
+
+    }
+
+    if(rotationCheckingFailed == true){
+
+
+//        delete[] boxPoint_current_data;
+//        delete[] boxPoint_next_data;
+        return rotationCheckingFailed;
+    }
+
+    FILE *fpout3;
+    char OutOcd_3[256];
+
+    string Output_3 = "velocity_Feather.txt";
+    strcpy(OutOcd_3,Output_3.c_str());
+
+    if((fpout3 = fopen(OutOcd_3, "w"))==NULL)
+        cout << "cannot open outAttr file to write\n";
+
+    vector<pair<double,double>>::iterator vel_Iter = Vel.begin();
+    vector<pair<double,double>>::iterator coord_Iter = Coord.begin();
+    pair<double,double> veltemp;
+    pair<double,double> coordtemp;
+    while(vel_Iter!=Vel.end()){
+        veltemp= (*vel_Iter++);
+        coordtemp= (*coord_Iter++);
+        fprintf(fpout3, "%f %f %f %f\n", coordtemp.first, coordtemp.second,veltemp.first, veltemp.second);
+    }
+
+
     fclose(fpout3);
 
-    delete[] temp_coord3D;
-    delete[] point_in_ds_0;
-    delete[] point_in_ds_1;
-    delete[] point_in_ds_2;
-    delete[] point_in_ds_3;
-//    delete[] temp_val;
 
+
+    // We use the same variable here for convenience, actually this is checking the symmetric of the velocity
+    iter_BoxPoint = boxPointsInloop.begin();
+    vector<pair<int,int>>::iterator iter_BoxPoint_latterHalf = boxPointsInloop.begin()+boxPointsInloop.size()/2;
+    int i = 0;
+    while(i< boxPointsInloop.size()/2){
+        boxPoint_current = *(iter_BoxPoint);
+        boxPoint_next = *(iter_BoxPoint_latterHalf);
+        boxPoint_current_x = xCoord[boxPoint_current.first];
+        boxPoint_current_y = yCoord[boxPoint_current.second];
+        boxPoint_next_x = xCoord[boxPoint_next.first];
+        boxPoint_next_y = yCoord[boxPoint_next.second];
+        boxPoint_current_index = in_ds->FindPoint(boxPoint_current_x,boxPoint_current_y,centerZ_InDataset);
+        in_ds->GetPointData()->GetTensors()->GetTuple(boxPoint_current_index,boxPoint_current_data.get());
+        boxPoint_next_index = in_ds->FindPoint(boxPoint_next_x, boxPoint_next_y,centerZ_InDataset);
+        in_ds->GetPointData()->GetTensors()->GetTuple(boxPoint_next_index,boxPoint_next_data.get());
+
+
+        angle_current = atan2(boxPoint_current_data[2],boxPoint_current_data[1]);
+        angle_next = atan2(boxPoint_next_data[2],boxPoint_next_data[1]);
+        angleDiff_current = angle_current - angle_next;
+        if(angleDiff_current>2*M_PI)
+            angleDiff_current = angleDiff_current - 2*M_PI;
+        else if(angleDiff_current<-2*M_PI)
+            angleDiff_current = angleDiff_current + 2*M_PI;
+
+        if(((fabs(angleDiff_current)<(M_PI+symmetricAngle)) && (fabs(angleDiff_current)>(M_PI-symmetricAngle)))== false){
+            firstFailSymmetry_inFunc = i;
+            symmetryFailValue_inFunc = angleDiff_current;
+            rotationCheckingFailed = true;
+            failureReason_inFunc.push_back(make_pair(6,fabs(angleDiff_current)));
+            break;
+        }
+
+        i++;
+        iter_BoxPoint++;
+        iter_BoxPoint_latterHalf++;
+    }
+
+
+
+
+//    delete[] boxPoint_current_data;
+//    delete[] boxPoint_next_data;
+    return rotationCheckingFailed;
+}
+
+
+
+//Created on 07/28/2021 By Weiping Hua
+bool velocityMag_LocalMin_onSurface_withoutETA(vtkSmartPointer<vtkDataSet>& in_ds,  vector<pair<cv::Point2d,double>>& velocityMag_centorid,const string OutputOcdfile,const int startRadius, shared_ptr<double[]> xCoord, shared_ptr<double[]> yCoord, double depthOnSurface,const vtkNew<vtkKdTreePointLocator>& KDTree){
+
+
+    // Initialization
+
+
+
+
+
+
+
+
+
+
+    shared_ptr <double[]> temp_coord3D(new double[3]);
+    shared_ptr <double[]> temp_val(new double[9]);
+    bool rotationCheckingFailed = false;
+    double data_xLength = dataset_xLength;
+    double data_yLength = dataset_yLength;
+    double search_rangeX = data_xLength;
+    double search_rangeY = data_yLength;
+    vector<double> searchData;
+    cv::Point velocityMag_detected;
+    int boxCenter_x;
+    int boxCenter_y;
+
+    int searchRadius;
+
+
+
+
+
+
+
+    searchData.reserve(search_rangeX*search_rangeY);
+
+//    while(iter_eta != eta_centroid_pointSet.end()){
+//        cv::Point eta_centroid_point;
+//        eta_centroid_point = (*iter_eta).first;
+//        double eta_center_inDataset_x = eta_centroid_point.x/data_xLength*(bounds[1] - bounds[0]+0.04)+bounds[0];
+//        double eta_center_inDataset_y = eta_centroid_point.y/data_xLength*(bounds[3] - bounds[2]+0.04)+bounds[2];
+//        fprintf(fpout4,"%f %f\n",eta_center_inDataset_x,eta_center_inDataset_y);
+//        ++iter_eta;
+//    }
+//    fclose(fpout4);
+
+        searchData.clear();
+        cv::Point eta_centroid_point;
+
+        double eta_search_inDataset_x;
+        double eta_search_inDataset_y;
+
+
+        double velocityMag_dataPoint;
+        for(int i = 0; i<search_rangeX; i++){
+            for(int j=0; j<search_rangeY;j++){
+
+                vtkIdType dataPoint_index;
+                eta_search_inDataset_x = xCoord[i];
+                eta_search_inDataset_y = yCoord[j];
+//                eta_centroid_inDataset_x = (eta_centroid_point.x - (search_rangeX-1)/2 + i)*1;
+//                eta_centroid_inDataset_y = (eta_centroid_point.y - (search_rangeY-1)/2 + j)*1;
+
+                double pointCoord[3] = {eta_search_inDataset_x, eta_search_inDataset_y,depthOnSurface};
+                dataPoint_index = KDTree->FindClosestPoint(pointCoord);
+                in_ds->GetPointData()->GetTensors()->GetTuple(dataPoint_index,temp_val.get());
+                velocityMag_dataPoint = sqrt(pow(temp_val[1],2)+pow(temp_val[2],2));
+                searchData.push_back(velocityMag_dataPoint);
+
+            }
+        }
+
+
+
+
+
+
+
+
+        Mat input_temp = Mat(searchData);
+        Mat input_velocity = input_temp.reshape(1, search_rangeX).clone();
+        Mat input_erode;
+        Mat erode_result;
+
+
+        //Rv
+        Mat morph_kernal = getStructuringElement(MORPH_RECT, Size(11,11));
+
+        cv::erode(input_velocity,input_erode,morph_kernal);
+        cv::compare(input_velocity,input_erode,erode_result,CMP_EQ);
+
+        vector<vector<cv::Point>> erode_contours;
+        cv::findContours(erode_result,erode_contours,cv::RETR_EXTERNAL,cv::CHAIN_APPROX_NONE);
+        vector<vector<cv::Point>>::iterator iter_contour = erode_contours.begin();
+        while(iter_contour != erode_contours.end()){
+            if((*iter_contour).size()>4)
+                iter_contour = erode_contours.erase(iter_contour);
+            else{
+                if((*iter_contour).size()==4){
+                    vector<cv::Point> temp_point;
+                    temp_point.push_back((*iter_contour)[2]);
+                    iter_contour = erode_contours.erase(iter_contour);
+                    erode_contours.push_back(temp_point);
+                }
+                else if((*iter_contour).size()==3){
+                    vector<cv::Point> temp_point;
+                    temp_point.push_back((*iter_contour)[1]);
+                    iter_contour = erode_contours.erase(iter_contour);
+                    erode_contours.push_back(temp_point);
+                }
+                else if ((*iter_contour).size()== 2) {
+                    vector<cv::Point> temp_point;
+                    temp_point.push_back((*iter_contour)[0]);
+                    iter_contour = erode_contours.erase(iter_contour);
+                    erode_contours.push_back(temp_point);
+                }
+                else
+                    iter_contour++;
+            }
+        }
+
+
+        // Rotation check on a circle
+        iter_contour = erode_contours.begin();
+
+
+        double maxVelocityMagDiff = 0;
+        double maxVelocityAngleDiff = 0;
+        short numPositiveDirectPoints = 0;
+        short firstFailSymmetry = -1;
+        short firstFailDeadZone = -1;
+        short failureReason = -1;
+        double symmetryFailValue = 0;
+        double deadzoneFailValue = 0;
+
+        while(iter_contour != erode_contours.end()){
+            velocityMag_detected = (*iter_contour).at(0);
+            boxCenter_x = velocityMag_detected.y;
+            boxCenter_y = velocityMag_detected.x;
+            double boxCenter_inDataset_x = xCoord[boxCenter_x];
+            double boxCenter_inDataset_y = yCoord[boxCenter_y];
+
+            velocityMag_centorid.push_back(make_pair(cv::Point(boxCenter_x,boxCenter_y), 0));
+
+
+
+
+
+
+            ++iter_contour;
+
+        }
+
+//    vector<cv::Point>::iterator it=velocityMag_centorid.begin();
+//    while(it!=velocityMag_centorid.end()){
+//        cv::Point tempPoint = *(it++);
+//        double boxPoint_current_x = tempPoint.x/data_xLength*(bounds[1] - bounds[0]+0.04)+bounds[0];
+//        double boxPoint_current_y = tempPoint.y/data_yLength*(bounds[3] - bounds[2]+0.04)+bounds[2];
+//        vtkIdType tempPoint_index = in_ds->FindPoint(boxPoint_current_x,boxPoint_current_y,bounds[4]);
+//        temp_coord3D=in_ds->GetPoint(tempPoint_index);
+//        temp_val=in_ds->GetPointData()->GetTensors()->GetTuple(tempPoint_index);
+//        fprintf(fpout3,"%6lld %9.6f %9.6f %9.6f  %f %f %f %f\n", tempPoint_index, (float) temp_coord3D[0], (float) temp_coord3D[1], (float) temp_coord3D[2], (float) temp_val[0], (float)temp_val[1],(float)temp_val[2],(float)temp_val[3]);
+
+//    }
+
+
+//    delete[] temp_coord3D;
+//    delete[] temp_val;
+//    temp_coord3D = NULL;
+//    temp_val = NULL;
+
+
+    return true;
 
 }
+
+
+bool velocityMag_LocalMin_onSurface(vtkSmartPointer<vtkDataSet>& in_ds, vector<pair<cv::Point2d,double>>& eta_centroid_pointSet, vector<pair<cv::Point2d,double>>& velocityMag_centorid,const string OutputOcdfile,const int startRadius, shared_ptr<double[]> xCoord, shared_ptr<double[]> yCoord, double depthOnSurface,const vtkNew<vtkKdTreePointLocator>& KDTree){
+
+
+    // Initialization
+
+    vector<pair<cv::Point2d,double>>::iterator iter_eta = eta_centroid_pointSet.begin();
+
+
+    shared_ptr <double[]> temp_coord3D(new double[3]);
+    shared_ptr <double[]> temp_val(new double[9]);
+    bool rotationCheckingFailed = false;
+    double data_xLength = dataset_xLength;
+    double data_yLength = dataset_yLength;
+    double search_rangeX = 21;
+    double search_rangeY = search_rangeX;
+    vector<double> searchData;
+    cv::Point velocityMag_detected;
+    int boxCenter_x;
+    int boxCenter_y;
+
+    int searchRadius;
+
+
+
+
+
+
+
+    searchData.reserve(search_rangeX*search_rangeY);
+
+//    while(iter_eta != eta_centroid_pointSet.end()){
+//        cv::Point eta_centroid_point;
+//        eta_centroid_point = (*iter_eta).first;
+//        double eta_center_inDataset_x = eta_centroid_point.x/data_xLength*(bounds[1] - bounds[0]+0.04)+bounds[0];
+//        double eta_center_inDataset_y = eta_centroid_point.y/data_xLength*(bounds[3] - bounds[2]+0.04)+bounds[2];
+//        fprintf(fpout4,"%f %f\n",eta_center_inDataset_x,eta_center_inDataset_y);
+//        ++iter_eta;
+//    }
+//    fclose(fpout4);
+    iter_eta = eta_centroid_pointSet.begin();
+    int counter1 = 0;
+    while(iter_eta != eta_centroid_pointSet.end()){
+
+
+
+        searchData.clear();
+        cv::Point eta_centroid_point;
+        eta_centroid_point = (*iter_eta).first;
+
+        double eta_search_inDataset_x;
+        double eta_search_inDataset_y;
+
+
+        double velocityMag_dataPoint;
+        for(int i = 0; i<search_rangeX; i++){
+            for(int j=0; j<search_rangeY;j++){
+
+                vtkIdType dataPoint_index;
+                eta_search_inDataset_x = xCoord[eta_centroid_point.x - (search_rangeX-1)/2 + i];
+                eta_search_inDataset_y = yCoord[eta_centroid_point.y - (search_rangeY-1)/2 + j];
+//                eta_centroid_inDataset_x = (eta_centroid_point.x - (search_rangeX-1)/2 + i)*1;
+//                eta_centroid_inDataset_y = (eta_centroid_point.y - (search_rangeY-1)/2 + j)*1;
+
+                double pointCoord[3] = {eta_search_inDataset_x, eta_search_inDataset_y,depthOnSurface};
+                dataPoint_index = KDTree->FindClosestPoint(pointCoord);
+                in_ds->GetPointData()->GetTensors()->GetTuple(dataPoint_index,temp_val.get());
+                velocityMag_dataPoint = sqrt(pow(temp_val[1],2)+pow(temp_val[2],2));
+                searchData.push_back(velocityMag_dataPoint);
+
+            }
+        }
+
+
+
+
+
+
+
+
+        Mat input_temp = Mat(searchData);
+        Mat input_velocity = input_temp.reshape(1, search_rangeX).clone();
+        Mat input_erode;
+        Mat erode_result;
+
+
+        //Rv
+        Mat morph_kernal = getStructuringElement(MORPH_RECT, Size(5,5));
+
+        cv::erode(input_velocity,input_erode,morph_kernal);
+        cv::compare(input_velocity,input_erode,erode_result,CMP_EQ);
+
+        vector<vector<cv::Point>> erode_contours;
+        cv::findContours(erode_result,erode_contours,cv::RETR_EXTERNAL,cv::CHAIN_APPROX_NONE);
+        vector<vector<cv::Point>>::iterator iter_contour = erode_contours.begin();
+        while(iter_contour != erode_contours.end()){
+            if((*iter_contour).size()>4)
+                iter_contour = erode_contours.erase(iter_contour);
+            else{
+                if((*iter_contour).size()==4){
+                    vector<cv::Point> temp_point;
+                    temp_point.push_back((*iter_contour)[2]);
+                    iter_contour = erode_contours.erase(iter_contour);
+                    erode_contours.push_back(temp_point);
+                }
+                else if((*iter_contour).size()==3){
+                    vector<cv::Point> temp_point;
+                    temp_point.push_back((*iter_contour)[1]);
+                    iter_contour = erode_contours.erase(iter_contour);
+                    erode_contours.push_back(temp_point);
+                }
+                else if ((*iter_contour).size()== 2) {
+                    vector<cv::Point> temp_point;
+                    temp_point.push_back((*iter_contour)[0]);
+                    iter_contour = erode_contours.erase(iter_contour);
+                    erode_contours.push_back(temp_point);
+                }
+                else
+                    iter_contour++;
+            }
+        }
+
+
+        // Rotation check on a circle
+        iter_contour = erode_contours.begin();
+
+
+        double maxVelocityMagDiff = 0;
+        double maxVelocityAngleDiff = 0;
+        short numPositiveDirectPoints = 0;
+        short firstFailSymmetry = -1;
+        short firstFailDeadZone = -1;
+        short failureReason = -1;
+        double symmetryFailValue = 0;
+        double deadzoneFailValue = 0;
+
+        while(iter_contour != erode_contours.end()){
+            velocityMag_detected = (*iter_contour).at(0);
+            boxCenter_x = velocityMag_detected.y + eta_centroid_point.x - (search_rangeX-1)/2;
+            boxCenter_y = velocityMag_detected.x + eta_centroid_point.y - (search_rangeY-1)/2;
+            double boxCenter_inDataset_x = xCoord[boxCenter_x];
+            double boxCenter_inDataset_y = yCoord[boxCenter_y];
+
+            velocityMag_centorid.push_back(make_pair(cv::Point(boxCenter_x,boxCenter_y), 0));
+
+
+
+
+
+
+            ++iter_contour;
+
+        }
+        ++iter_eta;
+
+    }
+
+
+//    delete[] temp_coord3D;
+//    delete[] temp_val;
+//    temp_coord3D = NULL;
+//    temp_val = NULL;
+
+
+
+    return true;
+
+}
+
+bool velocityMag_LocalMin(vtkSmartPointer<vtkDataSet>&in_ds, double& centerX,double& centerY,double centerZ_inDataset, vector<pair<cv::Point3d,double>>& velocityMag_centorid, vector<pair<cv::Point2d, double>>& filledCirclePointsInLoop, const int startRadius, shared_ptr<double[]> xCoord, shared_ptr<double[]> yCoord,const string baseOutputFile,const vtkNew<vtkKdTreePointLocator>& KDTree, eddyProperty& SingleEddy, vector<pair<int,double>> (&failureReasonReturn), int& finalRadius, bool testEddyFlag){
+
+
+    // Initialization
+
+
+
+
+
+
+
+
+
+    shared_ptr <double[]> temp_coord3D(new double[3]);
+    shared_ptr <double[]> temp_val(new double[9]);
+
+
+    bool rotationCheckingFailed = false;
+    double search_rangeX = 5;
+    double search_rangeY = 5;
+    vector<double> searchData;
+
+    int boxCenter_x;
+    int boxCenter_y;
+
+    int searchRadius;
+    double velocitySearch_inDataset_x;
+    double velocitySearch_inDataset_y;
+    double velocityMag_dataPoint;
+
+
+    searchData.reserve(search_rangeX*search_rangeY);
+
+    for(int i = 0; i<search_rangeX; i++){
+        for(int j=0; j<search_rangeY;j++){
+
+            vtkIdType dataPoint_index;
+            velocitySearch_inDataset_x = xCoord[(centerX - (search_rangeX-1)/2 + i)];
+            velocitySearch_inDataset_y = yCoord[(centerY - (search_rangeY-1)/2 + j)];
+//                eta_centroid_inDataset_x = (eta_centroid_point.x - (search_rangeX-1)/2 + i)*1;
+//                eta_centroid_inDataset_y = (eta_centroid_point.y - (search_rangeY-1)/2 + j)*1;
+
+            dataPoint_index = in_ds->FindPoint(velocitySearch_inDataset_x, velocitySearch_inDataset_y,centerZ_inDataset);
+            in_ds->GetPointData()->GetTensors()->GetTuple(dataPoint_index, temp_val.get());
+            velocityMag_dataPoint = sqrt(pow(temp_val[1],2)+pow(temp_val[2],2));
+            searchData.push_back(velocityMag_dataPoint);
+        }
+    }
+
+    Mat input_temp = Mat(searchData);
+    Mat input_velocity = input_temp.reshape(1, search_rangeX).clone();
+    cv::Point minVelocity;
+    double minValue;
+    cv::minMaxLoc(input_velocity,&minValue,NULL,&minVelocity,NULL);
+    if(minValue == 0)
+        return false;
+
+
+    // Rotation check on a circle
+    double maxVelocityMagDiff = 0;
+    double maxVelocityAngleDiff = 0;
+    short numPositiveDirectPoints = 0;
+    short firstFailSymmetry = -1;
+    short firstFailDeadZone = -1;
+    double symmetryFailValue = 0;
+    double deadzoneFailValue = 0;
+
+
+    searchRadius = 3;
+    rotationCheckingFailed = false;
+
+    centerX = centerX - (search_rangeX-1)/2 + minVelocity.y;
+    centerY = centerY - (search_rangeX-1)/2 + minVelocity.x;
+
+    boxCenter_x = centerX;
+    boxCenter_y = centerY;
+    // Notice the x and y are changed here
+    // I guess that is due to the reshape of the searchData
+    double boxCenter_inDataset_x = xCoord[boxCenter_x];
+    double boxCenter_inDataset_y = yCoord[boxCenter_y];
+    double pointCoord[3]= {boxCenter_inDataset_x,boxCenter_inDataset_y,centerZ_inDataset};
+    vtkIdType tempPoint_index = KDTree->FindClosestPoint(pointCoord);
+    in_ds->GetPoint(tempPoint_index,temp_coord3D.get());
+    in_ds->GetPointData()->GetTensors()->GetTuple(tempPoint_index,temp_val.get());
+
+
+
+    vector<pair<int,int>> boxPoints;
+    vector<pair<int,int>> boxPoints_backup;
+    vector<pair<pair<int,int>,int>> BoxPoint4Radius;
+
+
+    pair<int,int> boxPoint_current;
+    pair<cv::Point2d, double> boundaryPoint_current;
+    shared_ptr<double[]> boxPoint_current_data(new double[9]);
+    vector<pair<int,int>>::iterator iter_BoxPoint;
+    vector<pair<cv::Point2d, double>>::iterator iter_boundaryPoint;
+
+
+    double pointOnBoundary_inDataset_x = 0;
+    double pointOnBoundary_inDataset_y = 0;
+
+
+    vector<bool> clockwiseFlag;
+    clockwiseFlag.clear();
+    while(rotationCheckingFailed == false){  
+        boxPoints_backup = boxPoints;
+        boxPoints.clear();
+        rotationCheckingFailed = circleRotationCheck(in_ds, boxCenter_x,boxCenter_y, centerZ_inDataset,searchRadius, maxVelocityMagDiff,maxVelocityAngleDiff,numPositiveDirectPoints,firstFailSymmetry,symmetryFailValue, firstFailDeadZone,deadzoneFailValue, failureReasonReturn,boxPoints,xCoord, yCoord,clockwiseFlag,testEddyFlag);
+
+
+
+
+
+        iter_BoxPoint = boxPoints_backup.begin();
+        while(iter_BoxPoint != boxPoints_backup.end()){
+
+
+
+            boxPoint_current = *(iter_BoxPoint);
+            BoxPoint4Radius.push_back(make_pair(boxPoint_current,searchRadius-1));
+            iter_BoxPoint++;
+        }
+
+        finalRadius=searchRadius;
+        searchRadius++;
+    }
+
+
+    if(searchRadius>startRadius+1 ){
+
+
+        velocityMag_centorid.push_back(make_pair(cv::Point3d(boxCenter_x,boxCenter_y, centerZ_inDataset), searchRadius-2));
+
+        //Data on the boundary
+
+
+
+
+        // Fill the hole
+        vector<pair<int,int>>::iterator fillIterator = boxPoints_backup.begin();
+        filledCirclePointsInLoop.push_back(make_pair(cv::Point2d(boxPoints_backup.at(0).first,boxPoints_backup.at(0).second),centerZ_inDataset));
+        fillIterator++;
+        for(int boundaryPointsCounter = 1; boundaryPointsCounter<=(boxPoints_backup.size()/2-1);++boundaryPointsCounter){
+            pair<int, int> boundaryPoints = *(fillIterator++);
+            for(int xCoord = boundaryPoints.first; xCoord>=boundaryPoints.first-2*abs(boxCenter_x - boundaryPoints.first); --xCoord){
+                filledCirclePointsInLoop.push_back(make_pair(cv::Point2d(xCoord, boundaryPoints.second),centerZ_inDataset));
+            }
+        }
+        filledCirclePointsInLoop.push_back(make_pair(cv::Point2d(boxPoints_backup.at(boxPoints_backup.size()/2).first,boxPoints_backup.at(boxPoints_backup.size()/2).second),centerZ_inDataset));
+        std::sort(filledCirclePointsInLoop.begin(),filledCirclePointsInLoop.end(),[](pair<cv::Point2d,double> a, pair<cv::Point2d,double> b) {
+            if(a.first.x<b.first.x){
+                return true;
+            }
+            else if(a.first.x==b.first.x){
+                if(a.first.y<b.first.y){
+                        return true;
+                }
+                return false;
+            }
+            else
+                return false;
+        });
+        filledCirclePointsInLoop.erase(std::unique(filledCirclePointsInLoop.begin(),filledCirclePointsInLoop.end()),filledCirclePointsInLoop.end());
+
+        iter_boundaryPoint = filledCirclePointsInLoop.begin();
+        while(iter_boundaryPoint != filledCirclePointsInLoop.end()){
+            boundaryPoint_current = *(iter_boundaryPoint);
+
+            pointOnBoundary_inDataset_x = xCoord[boundaryPoint_current.first.x];
+            pointOnBoundary_inDataset_y = yCoord[boundaryPoint_current.first.y];
+            SingleEddy.setValue(boxCenter_inDataset_x,boxCenter_inDataset_y,pointOnBoundary_inDataset_x, pointOnBoundary_inDataset_y,centerZ_inDataset, boundaryPoint_current,searchRadius-2,(int)clockwiseFlag[0]);
+
+            iter_boundaryPoint++;
+        }
+
+        return true;
+    }
+    else{
+        return false;
+    }
+
+
+//    vector<cv::Point>::iterator it=velocityMag_centorid.begin();
+//    while(it!=velocityMag_centorid.end()){
+//        cv::Point tempPoint = *(it++);
+//        double boxPoint_current_x = tempPoint.x/data_xLength*(bounds[1] - bounds[0]+0.04)+bounds[0];
+//        double boxPoint_current_y = tempPoint.y/data_yLength*(bounds[3] - bounds[2]+0.04)+bounds[2];
+//        vtkIdType tempPoint_index = in_ds->FindPoint(boxPoint_current_x,boxPoint_current_y,bounds[4]);
+//        temp_coord3D=in_ds->GetPoint(tempPoint_index);
+//        temp_val=in_ds->GetPointData()->GetTensors()->GetTuple(tempPoint_index);
+//        fprintf(fpout3,"%6lld %9.6f %9.6f %9.6f  %f %f %f %f\n", tempPoint_index, (float) temp_coord3D[0], (float) temp_coord3D[1], (float) temp_coord3D[2], (float) temp_val[0], (float)temp_val[1],(float)temp_val[2],(float)temp_val[3]);
+
+//    }
+
+
+//    delete[] temp_coord3D;
+//    delete[] temp_val;
+
+//    return true;
+
+}
+
+void closestCostalPosition(const cv::Point2d& centerPoint, const int& ncid, cv::Point2d& closestPoint, double& distance, shared_ptr<double[]> xCoord,shared_ptr<double[]> yCoord){
+    int temp_varid;
+
+    const size_t x_rho = dataset_xLength;
+    const size_t y_rho = dataset_yLength;
+    const size_t z_rho = dataset_zLength;
+
+    size_t dataStart[] = {0,0,0};
+    size_t dataCount[] = {1,y_rho,x_rho};
+
+    shared_ptr<double[]> temp_vals(new double [x_rho*y_rho*z_rho]);
+
+    nc_inq_varid(ncid, "tos", &temp_varid);
+    nc_get_vara_double(ncid, temp_varid, dataStart,dataCount,temp_vals.get());
+
+    //Find costal map
+    cv::Mat tempMap = Mat(y_rho, x_rho, CV_64FC1, temp_vals.get());
+
+    cv::threshold(tempMap, tempMap, 1000,1,THRESH_BINARY_INV);
+    tempMap.convertTo(tempMap,CV_8UC1,255);
+    vector<vector<Point>> contours;
+    vector<Vec4i> hierarchy;
+    findContours(tempMap,contours,hierarchy,RETR_EXTERNAL,CHAIN_APPROX_SIMPLE);
+    vector<Point>::iterator iter_contours;
+    vector<double> distanceResult;
+    cv::Point costalPoint;
+    iter_contours = contours[0].begin();
+
+    while(iter_contours!=contours[0].end()){
+        costalPoint = *iter_contours;
+        if(costalPoint.x == 0 || costalPoint.x == dataset_xLength-1||costalPoint.y == 0 || costalPoint.y == dataset_yLength-1)
+            distanceResult.push_back(DBL_MAX);
+        else
+            distanceResult.push_back(sqrt(pow((xCoord[costalPoint.x]-xCoord[centerPoint.x]),2)+pow((yCoord[costalPoint.y]-yCoord[centerPoint.y]),2)));
+        iter_contours++;
+    }
+
+    Mat contourDrwaing = Mat::zeros(tempMap.size(),CV_32FC1);
+    drawContours(contourDrwaing,contours,0,1);
+
+    auto minValue = std::min_element(distanceResult.begin(),distanceResult.end());
+    distance = *minValue;
+    closestPoint = contours[0][std::distance(distanceResult.begin(),minValue)];
+
+}
+
+
 
 //-------------------MAIN FUNCTION----------------------
 //
@@ -4907,28 +9525,62 @@ void checkRotation(const std::set<vtkIdType> &PointIdSet, const std::set<vtkIdTy
 
 int main(void)
 {
+    //local variables
     unsigned long ncells, nnodes;
     int cellpoints, nncomp, count, count1(0), count2(0), found,
-    InitialtimeStep, FinaltimeStep, SmallestObjVol, TimePrecision, TimeIncrement, currentTime;
+    InitialtimeStep, FinaltimeStep, SmallestObjVol, TimePrecision, TimeIncrement, currentTime, circleStartRadius;
     long x_dim(0), y_dim(0), z_dim(0), x0_dim(0), y0_dim(0), z0_dim(0),  x1_dim(0), y1_dim(0), z1_dim(0);
     int nspace = 3; //data space dimension
     int numberOfPointsInCell = 8; // assuming that the cell is cube.. same variable as cellpoints
     vector<string> allvariableNames;
     string file_name, datapath, FileBaseName, fileextension, listfile, base_GeneratedTrackFileNameOriginal;
-    unsigned long *node_conn_array = NULL;
-    float *coord_array = NULL;
-    float *node_data = NULL;
+    string ncFilePath = "";
+    eddyProperty SingleEddy;
+//    unsigned long *node_conn_array = NULL;
+//    float *coord_array = NULL;
+//    float *node_data = NULL;
     float thresh1, thresh2, deltaxval, deltayval, deltazval;
-    double *temp_iso_val;
+    shared_ptr<double[]> temp_iso_val(new double[9]);
     file_name = string("FeatureTrack.Conf").c_str();
-    cellpoints =8;
+
     
     //,&x_dim,&y_dim,&z_dim
-    parseConfigFile(base_GeneratedTrackFileNameOriginal, datapath,FileBaseName,fileextension,allvariableNames,file_name, InitialtimeStep, FinaltimeStep, deltaxval, deltayval, deltazval, SmallestObjVol, TimePrecision, TimeIncrement, thresh1, thresh2, x_dim, y_dim, z_dim, x0_dim, y0_dim, z0_dim, x1_dim, y1_dim, z1_dim);
+    parseConfigFile(base_GeneratedTrackFileNameOriginal, datapath, ncFilePath, FileBaseName,fileextension,allvariableNames,file_name, InitialtimeStep, FinaltimeStep, deltaxval, deltayval, deltazval, SmallestObjVol, TimePrecision, TimeIncrement, thresh1, thresh2, x_dim, y_dim, z_dim, x0_dim, y0_dim, z0_dim, x1_dim, y1_dim, z1_dim,circleStartRadius);
+
+    //Inital global variables
+    dataset_xLength = x_dim;
+    dataset_yLength = y_dim;
+    dataset_zLength = z_dim;
 
     cout<<"After parseconfigfile.. x_dim=["<<x_dim<<"] and y_dim=["<<y_dim<<"] and z_dim=["<< z_dim<<"]"  <<endl;  
     
-    time_t begin1, end1;
+
+    int ncid,retval;// pres_varid, temp_varid;
+    //int lat_varid, lon_varid, Tcline_varid, h_varid, Cs_r_varid, Cs_w_varid, u_Vals_varid, v_Vals_varid;
+    int y_varid, x_varid;
+
+    const shared_ptr<double[]> xCoordRecord(new double[dataset_xLength]);
+    const shared_ptr<double[]> yCoordRecord(new double[dataset_yLength]);
+
+
+    retval = nc_open(ncFilePath.c_str(), NC_NOWRITE, &ncid);
+    retval = nc_inq_varid(ncid, "YC", &y_varid);
+    retval = nc_inq_varid(ncid, "XC", &x_varid);
+    retval = nc_get_var_double(ncid, y_varid, yCoordRecord.get());
+    retval = nc_get_var_double(ncid, x_varid, xCoordRecord.get());
+
+
+
+    cout<<"After parseconfigfile.. x_dim=["<<x_dim<<"] and y_dim=["<<y_dim<<"] and z_dim=["<< z_dim<<"]"  <<endl;
+
+
+
+
+
+
+
+
+
     string polyext = ".poly";
     string nonamecharacter ="+";
     if (strcmp (FileBaseName.c_str(),nonamecharacter.c_str()) == 0 )
@@ -4936,13 +9588,16 @@ int main(void)
     else
         int a = CreateListFile(base_GeneratedTrackFileNameOriginal, datapath+FileBaseName, listfile, InitialtimeStep, FinaltimeStep, TimeIncrement, TimePrecision );
 
+
     
-    
-    
-    
+
+
     int maxCycleNumber = ((FinaltimeStep-InitialtimeStep)/TimeIncrement) +1;
     
-    for (int currentTime = 0; currentTime <maxCycleNumber; currentTime++ )
+
+
+
+    for (int currentTime = InitialtimeStep-1; currentTime <InitialtimeStep-1+maxCycleNumber; currentTime++ )
     {
         bool first_time = true;
         long Uocd_objID = 0;
@@ -4956,6 +9611,8 @@ int main(void)
         string outPacketF;
         string OutputOcdfile;
         string OutputOcdfile_filtered;
+        string OutputOcdCleanfile;
+        string failureFile;
         int temp_index = ((int)InitialtimeStep+currentTime*TimeIncrement); //Specify the time frame
         string currenttimevalue = precision_time(temp_index,TimePrecision);
         if (strcmp (FileBaseName.c_str(),nonamecharacter.c_str()) == 0 )
@@ -4975,7 +9632,9 @@ int main(void)
             attributeFile = base_GeneratedTrackFileName+currenttimevalue + ".attr";
             outPacketF = base_GeneratedTrackFileName + currenttimevalue + ".group";
             OutputOcdfile = base_GeneratedTrackFileName + currenttimevalue + ".uocd";
+
             OutputOcdfile_filtered = base_GeneratedTrackFileName + currenttimevalue + "_filtered" + ".uocd";
+            OutputOcdCleanfile = base_GeneratedTrackFileName + currenttimevalue + "_Clean" + ".uocd";
         }
         else
         {
@@ -4986,19 +9645,79 @@ int main(void)
             OutputOcdfile = base_GeneratedTrackFileName + FileBaseName +currenttimevalue + ".uocd";
             OutputOcdfile_filtered = base_GeneratedTrackFileName + FileBaseName + currenttimevalue + "_filtered"  + ".uocd";
             base_GeneratedTrackFileName = base_GeneratedTrackFileName + FileBaseName;
+            OutputOcdCleanfile = base_GeneratedTrackFileName + currenttimevalue + "_Clean" + ".uocd";
+            failureFile = base_GeneratedTrackFileName + currenttimevalue + "_failure" + ".txt";
         }
         
         cout << "mypolyfile is:[ " << mypolyfile<<"]" <<endl;
         cout << "file_name is:[ " << file_name<<"]" <<endl;
         
-        
-        vtkSmartPointer<vtkDataSet>in_ds = CreateVtkDataSet(fileextension,file_name,x_dim,y_dim,z_dim,datapath,x0_dim,y0_dim,z0_dim,x1_dim,y1_dim,z1_dim);
+
+        // GET THE SSH EXTREMUM FIRST
+        vector<pair<cv::Point2d,double>> eta_centroid;
+//        shared_ptr<double[]>zLevelData(new double[dataset_zLength]);
+        double* zLevelData = new double[dataset_zLength];
+        vtkSmartPointer<vtkDataSet>in_ds = CreateVtkDataSet(fileextension,file_name,x_dim,y_dim,z_dim,zLevelData,datapath,ncFilePath,x0_dim,y0_dim,z0_dim,x1_dim,y1_dim,z1_dim,currentTime);
+        bool etaFlag=0;
+        if(ncFilePath == "None")
+            etaFlag = ReadNcData_SSH_SingleFrame(eta_centroid,file_name, x_dim,y_dim,OutputOcdfile);
+        else{
+            if(z_dim==1)
+                etaFlag = ReadNcData_SSH_MultiFrame_2D(eta_centroid,ncFilePath, x_dim,y_dim,OutputOcdfile,currentTime);
+            else
+                etaFlag = ReadNcData_SSH_MultiFrame(eta_centroid,ncFilePath, x_dim,y_dim,OutputOcdfile,currentTime);
+        }
+        eta_centroid.erase(remove_if(eta_centroid.begin(),eta_centroid.end(),[](pair<cv::Point2d,double> x){return x.second == 0;}),eta_centroid.end());
+
+
+//        shared_ptr <double[]> temp_val(new double[9]);
+//        in_ds->GetPointData()->GetTensors()->GetTuple(10025,temp_val.get());
+
+
+
         nnodes = x_dim * y_dim * z_dim;
 
+        in_ds->GetBounds(bounds);
+
+
+        vtkNew<vtkKdTreePointLocator> KDTree;
+        KDTree->SetDataSet(in_ds);
+        KDTree->BuildLocator();
+
+        // Find the velocity center on the sea surface plane
+        vector<pair<cv::Point2d,double>> eddyCenter_onSurface;
+        double depthOnSurface = zLevelData[0];
+        if(etaFlag==0){
+            eta_centroid.erase(remove_if(eta_centroid.begin(),eta_centroid.end(),[](pair<cv::Point2d,double> x){return x.second == 0;}),eta_centroid.end());
+            velocityMag_LocalMin_onSurface(in_ds, eta_centroid, eddyCenter_onSurface,OutputOcdfile,circleStartRadius,xCoordRecord,yCoordRecord,depthOnSurface,KDTree);
+       }
+        else {
+            velocityMag_LocalMin_onSurface_withoutETA(in_ds, eddyCenter_onSurface,OutputOcdfile,circleStartRadius,xCoordRecord,yCoordRecord,depthOnSurface,KDTree);
+        }
+        std::sort(eddyCenter_onSurface.begin(),eddyCenter_onSurface.end(),centroidsCompare);
+        eddyCenter_onSurface.erase(std::unique(eddyCenter_onSurface.begin(),eddyCenter_onSurface.end()),eddyCenter_onSurface.end());
+
+
+        FILE *fpout3;
+        char OutOcd_2[256];
+        FILE *fpout5;
+        char OutOcd_5[256];
+        FILE *fpout_Failure;
+        char OutOcd_Failure[256];
+
+        string Output_2 = OutputOcdfile;
+        Output_2 = Output_2.substr(0, Output_2.rfind("."));
+        string Output_5 = Output_2 + "_3dcenter.uocd";
+        Output_2 = Output_2 + "_3dcenter_real.uocd";
+        strcpy(OutOcd_2,Output_2.c_str());
+        fpout3 = fopen(OutOcd_2, "w");
 
 
 
-
+        strcpy(OutOcd_5,Output_5.c_str());
+        fpout5 = fopen(OutOcd_5, "w");
+        strcpy(OutOcd_Failure,failureFile.c_str());
+        fpout_Failure = fopen(OutOcd_Failure, "w");
 
 
         int doVolRender = 1;
@@ -5011,6 +9730,7 @@ int main(void)
 
 
 
+        int idNumInCell;// (int) cellPointIds->GetNumberOfIds(); // this is 8 for a cube /rectilinear data -- (=numberofcellpoints).
 
         if(cell_types > 1)
         {
@@ -5018,10 +9738,24 @@ int main(void)
         }
 
         int cell_type = in_ds->GetCellType(0);
+
         
         if(cell_type == VTK_VOXEL || cell_type == VTK_QUAD || cell_type == VTK_HEXAHEDRON ||cell_type == VTK_PIXEL )
         {
             cout << "Good! cell type ["<< cell_type <<"] is voxel or quad or hexahedron \n";
+            if(cell_type == VTK_VOXEL || cell_type == VTK_HEXAHEDRON){
+                idNumInCell = 8;
+                cellpoints =8;
+            }
+            else if(cell_type == VTK_QUAD){
+                idNumInCell = 4;
+                cellpoints =4;
+            }
+            else{
+                idNumInCell = 1;
+                cellpoints =1;
+            }
+
         }
         else
         {
@@ -5033,14 +9767,16 @@ int main(void)
         vtkIdType ncells = in_ds->GetNumberOfCells();
        
         
-        bool *ProcessedCell= new bool[ncells];
-        for (long i=0; i<ncells ; i++ )
-            ProcessedCell[i] =false;
+        shared_ptr<bool[]> ProcessedCell(new bool[ncells]());
+//        shared_ptr<bool[]> ProcessedCell_step2(new bool[ncells]);
+
+//        bool *ProcessedCell= new bool[ncells]();
+//        bool *ProcessedCell_step2= new bool[ncells]();
         
         // cout<< "in Main.. Test 2 !! "<<endl;
         int ncomp = 0; //this is the number vector /scalars etc
         //double *temp_val = new double[ncomp];
-        vtkSmartPointer<vtkDataArray> vtk_node_data = NULL;
+        vtkSmartPointer<vtkDataArray> vtk_node_data;
         // cout<< "in Main.. Test 2.1 !! "<<endl;
         if (dataType == Scalar_data ){
             vtk_node_data = in_ds->GetPointData()->GetScalars();
@@ -5057,156 +9793,192 @@ int main(void)
 
 
 
-
-
         cout<< "in Main.. Test 2.2 !! "<<endl;
         std::set<vtkIdType>::iterator it1;
         std::set<vtkIdType>::iterator it2;
-        int aa = 8;// (int) cellPointIds->GetNumberOfIds(); // this is 8 for a cube /rectilinear data -- (=numberofcellpoints).
         long firstobj = -1;
+
         
-        
+        int zCounter = 1;
         std::vector<Point3D> AlltheCentroids;
         AlltheCentroids.clear();
-        
-        for(unsigned long i  = 0; i < ncells; i++) // go for each cell
+        vector<pair<cv::Point3d,double>> eddyCenter_inDepth;
+        vector<pair<cv::Point2d, double>> filledCirclePoints;
+        vector<pair<cv::Point2d, double>> filledStructurePoints;
+        std::set<vtkIdType> ThisObjectsMemberPointIds;
+        std::set<vtkIdType> ThisObjectsCellIds;
+        std::vector<vector<pair<int,double>>>failureReasonSet;
+        std::vector<int>successSet;
+        std::vector<int>successSet2;
+        std::vector<int>successSet3;
+
+        for(unsigned long i  = 0; i < eddyCenter_onSurface.size(); i++) // go for each center
         {
 
-            if(ProcessedCell[i] == false)
-            {
 
-                
-                vtkIdType cellId = (vtkIdType) i;  //<-- this is a cell's id. not a point's Id.
-                
-                
-                std::set<vtkIdType> ThisObjectsMemberPointIds;
-                std::set<vtkIdType> CandidateNeigborCellIdsToProcess;
-                std::set<vtkIdType> CandidateNeigborCellIdsToProcess_backup;
-                std::set<vtkIdType> ThisObjectsCellIds;
-                //std::vector<vtkIdType> ThisObjectsCompleteCellPointIds;
-                CandidateNeigborCellIdsToProcess.clear();
-                CandidateNeigborCellIdsToProcess_backup.clear();
+
+
+
+
                 ThisObjectsMemberPointIds.clear();
                 ThisObjectsCellIds.clear();
-                //ThisObjectsCompleteCellPointIds.clear();
-                CandidateNeigborCellIdsToProcess.insert(cellId);
-                CandidateNeigborCellIdsToProcess_backup = CandidateNeigborCellIdsToProcess;
-                
-                double MaxXDimValue = -999999999999999;
-                double MaxYDimValue = -999999999999999;
-                double MaxZDimValue = -999999999999999;
-                
-                double MinXDimValue = 999999999999999;
-                double MinYDimValue = 999999999999999;
-                double MinZDimValue = 999999999999999;
-                
-                while(CandidateNeigborCellIdsToProcess.size()>0)
-                {
 
-                    it1 = CandidateNeigborCellIdsToProcess.begin();
-                    cellId = *it1; //CandidateNeigborCellIdsToProcess[0];
-                    CandidateNeigborCellIdsToProcess.erase (cellId);
-                    if(ProcessedCell[(unsigned long)cellId] == false)
-                    {
-                        ProcessedCell[(unsigned long)cellId] = true;
-                        vtkSmartPointer<vtkIdList> cellPointIds = vtkSmartPointer<vtkIdList>::New();
-                        in_ds->GetCellPoints(cellId, cellPointIds); //<--- this one gets the points of the current cell (cellId)
-                        for(vtkIdType j = 0; j < aa ; j++) // for each cell point in this cell
-                        {
-                            vtkIdType pointindex = cellPointIds->GetId(j);
-                            double* temp_val_0;
-                            temp_val_0 = vtk_node_data->GetTuple(pointindex);
+                filledStructurePoints.clear();
+                bool velocityExistFlag = false;
+                bool structureExistsFlag = false;
+
+                SingleEddy.clearData();
+                vector<pair<int,double>> failureReason;
+
+                // Give a origin point
+                eddyCenter_inDepth.clear();
+                cv::Point2d velocityCenter_onSurface = eddyCenter_onSurface.at(i).first;
+//                eddyCenter_inDepth.push_back(make_pair(cv::Point3d(velocityCenter_onSurface.x, velocityCenter_onSurface.y, depthOnSurface),eddyCenter_onSurface.at(i).second));
+                zCounter = 0;
 
 
 
-                            // check whether we take the greater or smaller parts in the data...
-                            // Threshold must be positive
-                            bool testvalueForthisPoint = false;
 
-                            if (Greater)
-                            {
-                                //cout<<"inside if"<<endl;
-                                if(!Abs_value){
-                                    if(temp_val_0[0]>=thresh1)
-                                        testvalueForthisPoint = true;
+
+                // Find the velocity centers and structure points on each layer
+                while(zCounter<dataset_zLength){
+                    filledCirclePoints.clear();
+                    double eddyDepth = zLevelData[zCounter];
+
+
+                    int finalRadius=0;
+                    bool testEddyFlag(i==197 && eddyDepth==bounds[4]);
+                    velocityExistFlag = velocityMag_LocalMin(in_ds, velocityCenter_onSurface.x, velocityCenter_onSurface.y, eddyDepth,eddyCenter_inDepth,filledCirclePoints,circleStartRadius,xCoordRecord,yCoordRecord,base_GeneratedTrackFileNameOriginal,KDTree, SingleEddy,failureReason,finalRadius,testEddyFlag);
+                    ++zCounter;
+                    if(velocityExistFlag == true){
+                        filledStructurePoints.insert(filledStructurePoints.end(),filledCirclePoints.begin(),filledCirclePoints.end());
+                        structureExistsFlag = true;
+
+
+                    }
+                    else{
+                        if(eddyDepth <= zLevelData[0] && z_dim>1){
+                            structureExistsFlag = false;
+                            if(eddyDepth==bounds[4]){
+                                for(int failureIndex=0; failureIndex<failureReason.size();failureIndex++){
+                                    if(failureReason.at(failureIndex).first!=0 )
+                                        fprintf(fpout_Failure,"%9.6f %9.6f %9.6f %d %d %.4f %d\n", xCoordRecord[velocityCenter_onSurface.x],yCoordRecord[velocityCenter_onSurface.y],eddyDepth,finalRadius,failureReason.at(failureIndex).first,failureReason.at(failureIndex).second,i);
                                 }
-                                else{
-                                    if(abs(temp_val_0[0])>=abs(thresh1))
-                                        testvalueForthisPoint = true;
-                                }
+                            }
+                            failureReasonSet.push_back(failureReason);
+                        }
+                        else{
+                            structureExistsFlag = true;
 
+                        }
+                        break;
+                    }
+
+                }
+
+                if(structureExistsFlag == true){
+                    // Sort and erase duplicated center
+                    successSet.push_back(i);
+                    std::sort(eddyCenter_inDepth.begin(),eddyCenter_inDepth.end(),[](pair<cv::Point3d,double> a, pair<cv::Point3d,double> b) {
+                        if(a.first.z<b.first.z){
+                            return true;
+                        }
+                        else if(a.first.z==b.first.z){
+                            if(a.first.x<b.first.x){
+                                    return true;
+                            }
+                            else if(a.first.x==b.first.x){
+                                if(a.first.y<b.first.y){
+                                        return true;
+                                }
+                                return false;
                             }
                             else
+                                return false;
+                        }
+                        else
+                            return false;
+                    });
+                    eddyCenter_inDepth.erase(std::unique(eddyCenter_inDepth.begin(),eddyCenter_inDepth.end()),eddyCenter_inDepth.end());
+
+
+
+
+                    cv::Point3d centerCoord;
+                    cv::Point2d closestCostalPoint;
+                    double closestDistance;
+                    vector<pair<cv::Point3d,double>>::iterator centerIter = eddyCenter_inDepth.begin();
+                    while(centerIter != eddyCenter_inDepth.end()){
+                        centerCoord = (*centerIter).first;
+                        double centerRadius = (*centerIter).second;
+
+                        //find the closest costal position
+                        closestCostalPosition(cv::Point2d(centerCoord.x,centerCoord.y),ncid,closestCostalPoint,closestDistance, xCoordRecord, yCoordRecord);
+                        fprintf(fpout3,"%9.6f %9.6f %9.6f %f %f %.3f %f\n", xCoordRecord[centerCoord.x],yCoordRecord[centerCoord.y],centerCoord.z,xCoordRecord[closestCostalPoint.x], yCoordRecord[closestCostalPoint.y], closestDistance, centerRadius);
+                        fprintf(fpout5,"%9.6f %9.6f %9.6f %f %f %f\n", centerCoord.x,centerCoord.y,centerCoord.z,closestCostalPoint.x, closestCostalPoint.y,centerRadius);
+                        centerIter++;
+                    }
+
+
+
+
+                    for(std::vector<pair<cv::Point2d,double>>::iterator it=filledStructurePoints.begin(); it!=filledStructurePoints.end(); ++it){
+                        pair<cv::Point2d,double> pointCoor = *it;
+                        double xCoordInReal= xCoordRecord[pointCoor.first.x];
+                        double yCoordInReal= yCoordRecord[pointCoor.first.y];
+                        vtkIdType pointIndex = in_ds->FindPoint(xCoordRecord[pointCoor.first.x], yCoordRecord[pointCoor.first.y], pointCoor.second);
+
+                        //We're not able to tranverse the cell list as well so just create a new cell list with minor errors (A little bit more)
+                        vtkNew<vtkIdList> thispointsCellIds;
+
+                        vtkIdType CellId;
+                        in_ds-> GetPointCells(pointIndex, thispointsCellIds);
+                        for(vtkIdType k = 0; k < thispointsCellIds->GetNumberOfIds(); k++)
+                        {
+                            CellId = thispointsCellIds->GetId(k);
+                            if(ProcessedCell[CellId] == false)
                             {
-                                //cout<<"inside else"<<endl;
-                                if(!Abs_value){
-                                    if (temp_val_0[0]<=thresh1)
-                                        testvalueForthisPoint = true;
-                                }
-                                else{
-                                    if (abs(temp_val_0[0])<=abs(thresh1))
-                                        testvalueForthisPoint = true;
-                                }
+                                ProcessedCell[CellId] = true;
+                                ThisObjectsMemberPointIds.insert(pointIndex);
+                                ThisObjectsCellIds.insert(CellId);
                             }
 
-
-                            if (testvalueForthisPoint) // we found a point.. :)
-                            {
-                                //cout<<"inside the iftestvalue"<<endl;
-                                //-----Find the bounding box of the object for filtering ---
-                                if ( ThisDataType == 1) // do this computation only if you use it... :)
-                                {
-                                double *temp_coord3D = new double[3];
-                                in_ds->GetPoint(pointindex,temp_coord3D);
-
-                                if (temp_coord3D[0] > MaxXDimValue)
-                                    MaxXDimValue = temp_coord3D[0];
-
-                                if (temp_coord3D[1] > MaxYDimValue)
-                                    MaxYDimValue = temp_coord3D[1];
-
-                                if (temp_coord3D[2] > MaxZDimValue)
-                                    MaxZDimValue = temp_coord3D[2];
-
-
-
-                                if (temp_coord3D[0] < MinXDimValue)
-                                    MinXDimValue = temp_coord3D[0];
-
-                                if (temp_coord3D[1] < MinYDimValue)
-                                    MinYDimValue = temp_coord3D[1];
-
-
-                                if (temp_coord3D[2] < MinZDimValue)
-                                    MinZDimValue = temp_coord3D[2];
-
-                                delete[] temp_coord3D;
-                                temp_coord3D = NULL;
-                                }
-                                //-----
-
-
-                                // ThisObjectsCompleteCellIds.insert(cellId);
-                                //ThisObjectsCellIds.push_back(cellId);
-                                ThisObjectsCellIds.insert(cellId);
-                                ThisObjectsMemberPointIds.insert(pointindex);
-                                vtkSmartPointer<vtkIdList> thispointsCellIds = vtkSmartPointer<vtkIdList>::New();
-                                in_ds-> GetPointCells(pointindex, thispointsCellIds);
-                                for(vtkIdType k = 0; k < thispointsCellIds->GetNumberOfIds(); k++)
-                                {
-                                    CandidateNeigborCellIdsToProcess.insert(thispointsCellIds->GetId(k));
-                                }
-                            }
                         }
                     }
                 }
 
-                
+
+
+
+                //std::vector<vtkIdType> ThisObjectsCompleteCellPointIds;
+//                ThisObjectsMemberPointIds.clear();
+//                ThisObjectsCellIds.clear();
+                //ThisObjectsCompleteCellPointIds.clear();
+
+                double MaxXDimValue = DBL_MIN;
+                double MaxYDimValue = DBL_MIN;
+                double MaxZDimValue = DBL_MIN;
+
+                double MinXDimValue = DBL_MAX;
+                double MinYDimValue = DBL_MAX;
+                double MinZDimValue = DBL_MAX;
+
+//                int OW_min_index;
+//                int velocity_min_index;
+
+//                bool feature_flag = false;
+//                feature_flag = checkRotation3(ThisObjectsMemberPointIds, ThisObjectsCellIds, ProcessedCell_step2, vtk_node_data, in_ds, eta_centroid[i].first,
+//                               MaxXDimValue,MaxYDimValue,MaxZDimValue, MinXDimValue, MinYDimValue, MinZDimValue,OW_min_index,velocity_min_index,OutputOcdfile_filtered, first_time);
+
+
+
+
                 bool conditionforThisDataType = false;
-                if (ThisDataType == 1){ // enriques Data
-                    conditionforThisDataType = ((ThisObjectsMemberPointIds.size()>=SmallestObjVol) && (MinZDimValue > PossibleZThreshold) && (MinXDimValue > PossibleXThreshold) && (MaxYDimValue < PossibleYThreshold));
-//                    cout<<"i:["<<i<<"]"<<"conditionforThisDataType: "<<conditionforThisDataType<<endl;
-                    if( ThisObjectsMemberPointIds.size() >= SmallestObjVol ){
+                if (ThisDataType == 1 && ThisObjectsMemberPointIds.size()!=0){ // enriques Data
+                    conditionforThisDataType = (ThisObjectsMemberPointIds.size()>=SmallestObjVol);
+//                    conditionforThisDataType = ((ThisObjectsMemberPointIds.size()>=SmallestObjVol) && (MinZDimValue > PossibleZThreshold) && (MinXDimValue > PossibleXThreshold) && (MaxYDimValue < PossibleYThreshold));
+////                    cout<<"i:["<<i<<"]"<<"conditionforThisDataType: "<<conditionforThisDataType<<endl;
+                    if( ThisObjectsMemberPointIds.size() < SmallestObjVol ){
                         if(!conditionforThisDataType ){
                         cout <<"---------ThisDataType = 1------------," <<endl;
                         cout << "ThisObjectsMemberPointIds.size() : " << ThisObjectsMemberPointIds.size() << endl;
@@ -5223,29 +9995,84 @@ int main(void)
                         }
                     }
                 }
-                else if (ThisDataType == 2)
-                    conditionforThisDataType = (ThisObjectsMemberPointIds.size()>=SmallestObjVol);
-                
-                if (conditionforThisDataType && trackType != naiveTrack)
-                    checkRotation(ThisObjectsMemberPointIds, ThisObjectsCellIds, vtk_node_data, in_ds, MaxZDimValue,MinZDimValue,OutputOcdfile_filtered, first_time, currentTime, ncomp,Uocd_objID);
-                
+
+//                else if (ThisDataType == 2)
+//                    conditionforThisDataType = (ThisObjectsMemberPointIds.size()>=SmallestObjVol);
+
+
+
+//                if (conditionforThisDataType && trackType != naiveTrack){
+//                    checkRotation2(ThisObjectsMemberPointIds, ThisObjectsCellIds, ThisObjectsMemberPointIds, ThisObjectsCellIds, ProcessedCell_step2,vtk_node_data, in_ds, MaxZDimValue,MinZDimValue,OutputOcdfile_filtered, first_time, currentTime, ncomp,Uocd_objID,OW_min_x,OW_min_y,OW_min_z);
+//                    if(ThisObjectsMemberPointIds.size() < SmallestObjVol)
+//                        conditionforThisDataType = false;
+//                }
+
+                // Centroid by OW value
+//                double centroidToplayer_x = 0;
+//                double centroidToplayer_y = 0;
+//                double* OW_min_coord = in_ds->GetPoint(OW_min_index);
+//                centroidToplayer_x = OW_min_coord[0];
+//                centroidToplayer_y = OW_min_coord[1];
+
+//                //Centroid by Velocity Magnitude
+//                double centroidToplayer_velocity_x = 0;
+//                double centroidToplayer_velocity_y = 0;
+//                double* velocity_min_coord = in_ds->GetPoint(velocity_min_index);
+//                centroidToplayer_velocity_x = velocity_min_coord[0];
+//                centroidToplayer_velocity_y = velocity_min_coord[1];
+
+
+
+//                if (conditionforThisDataType)
+//                    conditionforThisDataType = checkRotation(ThisObjectsMemberPointIds, ThisObjectsCellIds, vtk_node_data, in_ds, MaxZDimValue,MinZDimValue,OutputOcdfile_filtered, first_time, currentTime, ncomp,Uocd_objID,OW_min_index,centroidToplayer_x, centroidToplayer_y);
+
+
                 //if ((ThisObjectsMemberPointIds.size()>=SmallestObjVol) && (MinZDimValue > PossibleZThreshold))    //this is the extracted object!!!...
                 if (conditionforThisDataType)  //this is the extracted object!!!...
                 {
+                    successSet2.push_back(i);
+                    //-----------------------------------------------------------------------------------------
+                    // This part is extreamly annoying and we need to rewrite it with vtkRectilinearGrid
+                    // so that we could get rid of cells as we're only working with vtk_Voxel or VTK_HEXAHEDRON.
+                    //------------------------------------------------------------------------------------------
+
                     cout<<"MinXDimValue: "<<MinXDimValue<<"MinXDimValue: "<<MinXDimValue<<"MinXDimValue: "<<MinXDimValue<<endl;
                     // if you want to show each extracted objects volume during the process, please uncomment the next line!!!
                     //cout<< "found an object! !! ThisObjectsVolume=["<<ThisObjectsMemberPointIds.size()<<"]"<<endl;
                     firstobj++;
                     cout<<" i:["<<i<<"] & ThisObjectsMemberPointIds.size():["<<ThisObjectsMemberPointIds.size()<<"] & ThisObjectsCellIds.size()="<<ThisObjectsCellIds.size()   <<endl;
+
+
+
+                    FILE *fpout_statis;
+                    char OutOcd_statistic[256];
+                    string Output_statistic;
+
+
+
+                    if(SingleEddy.getRotation()==1)
+                        Output_statistic = base_GeneratedTrackFileNameOriginal +"Seperated Structures/clockwise/"+"Frame_"+(currenttimevalue) +"_eddy_"+to_string(firstobj) +"_statistic.uocd";
+                    else
+                        Output_statistic = base_GeneratedTrackFileNameOriginal +"Seperated Structures/counterclockwise/"+"Frame_"+(currenttimevalue) +"_eddy_"+to_string(firstobj) +"_statistic.uocd";
+                    strcpy(OutOcd_statistic,Output_statistic.c_str());
+                    if((fpout_statis = fopen(OutOcd_statistic, "w"))==NULL)
+                        cout << "cannot open outAttr file to write\n";
+                    SingleEddy.printData(fpout_statis,KDTree,in_ds,stoi(currenttimevalue), firstobj);
+
+
+
+                    SingleEddy.clearData();
+                    fclose(fpout_statis);
                     unsigned long thisObjectsVolume = ThisObjectsMemberPointIds.size();
-                    
-                           
-                    vtkIdType *ObjectCellsArray = new vtkIdType[ThisObjectsCellIds.size()];
+
+
+//                    vtkIdType *ObjectCellsArray = new vtkIdType[ThisObjectsCellIds.size()];
+                    shared_ptr<vtkIdType[]> ObjectCellsArray(new vtkIdType[ThisObjectsCellIds.size()]);
                     //vtkIdType *CellPointIdsArray = new vtkIdType[thisObjectsVolume];
                     long tt=0;
-                    
-                    
-                    
+
+
+
                     // convert from set to an array..
                     tt=0;
                     for (std::set<vtkIdType>::iterator it=ThisObjectsCellIds.begin(); it!=ThisObjectsCellIds.end(); ++it)
@@ -5253,26 +10080,26 @@ int main(void)
                         ObjectCellsArray[tt] = *it;
                         tt++;
                     }
-                    ThisObjectsCellIds.clear();
+
                     //
                     int dummycounter = 0;
                     int founditem = 0;
                     unsigned long totalnumberofcellsinthisobj = tt;//ThisObjectsCellIds.size();
                     //cout<<" totalnumberofcellsinthisobj= "<<  totalnumberofcellsinthisobj<<endl;
-                    
-                    
+
+
                     //create a new unstructured data set for this object only..
-                    
+
                     std::set<vtkIdType> ThisObjectsCompleteCellPointIds;
                     ThisObjectsCompleteCellPointIds.clear();
-                    
-                    
+
+
                     vtkSmartPointer<vtkIdList> cellPointIds1 = vtkSmartPointer<vtkIdList>::New();
                     for(unsigned long hm = 0; hm < totalnumberofcellsinthisobj; hm++)
                     {
                         in_ds->GetCellPoints(ObjectCellsArray[hm], cellPointIds1);
-            //cout<< "aa = " << aa << endl;
-                        for(vtkIdType j = 0; j < aa ; j++)
+
+                        for(vtkIdType j = 0; j < idNumInCell ; j++)
                         {
                             vtkIdType pointindex1 = cellPointIds1->GetId(j);
                             //cout<<"pointindex1= "<<pointindex1<<endl;
@@ -5290,15 +10117,17 @@ int main(void)
                     PointIdsArray.resize(thisObjectsVolume);
                     //
                     long tt1=0;
+                    //PointIdsArray1 is used for polygons and others.
                     for (std::set<vtkIdType>::iterator it=ThisObjectsCompleteCellPointIds.begin(); it!=ThisObjectsCompleteCellPointIds.end(); ++it)
                     {
                         PointIdsArray1[tt1] = *it; //AllRelatedPointIdSet
                         //cout<<"PointIdsArray1["<<tt1<<"]= "<<PointIdsArray1[tt1]<<endl;
                         tt1++;
                     }
-                    
-                    
+
+
                     long tt2=0;
+                    //PointIdsArray is only used for .uocd file and moments
                     for (std::set<vtkIdType>::iterator it=ThisObjectsMemberPointIds.begin(); it!=ThisObjectsMemberPointIds.end(); ++it)
                     {
                         PointIdsArray[tt2] = *it; //PointIdSet
@@ -5306,15 +10135,16 @@ int main(void)
                         tt2++;
                     }
 
-
-                    float *coords=new float[cursor*nspace]; //convert this back to double soon. :)
-                    double *nodevals=new double[cursor];
-                    unsigned long *connects=new unsigned long[totalnumberofcellsinthisobj*cellpoints];
+                    shared_ptr<float[]> coords(new float[cursor*nspace]);
+                    shared_ptr<double[]> nodevals(new double[cursor]);
+//                    float *coords=new float[cursor*nspace]; //convert this back to double soon. :)
+//                    double *nodevals=new double[cursor];
+                    shared_ptr<unsigned long[]> connects(new unsigned long[totalnumberofcellsinthisobj*cellpoints]);
                     double temp_coord[3];
                     unsigned long j1=0;
                     unsigned long j2=0;
                     unsigned long j3=0;
-                    double* temp_val;
+                    shared_ptr<double[]> temp_val(new double[9]);
                     double mass = 0;
                     double Cx, Cy, Cz;
                     Cx = Cy = Cz = 0;
@@ -5336,15 +10166,15 @@ int main(void)
                     double MaxValZ = 0;     //in the future these coordinate values can be combined into a single array
                     //our code computes all the mass and others according to the cell points not to the actual (above the thresh) points...
                     //therefore in the future go in another loop including only those actual points.....
-                    
+
                     vtkIdType maxValNodeID=0;
                     vtkIdType minValNodeID=0;
-                    
+
                     //cout<< "cursor =  " << cursor << endl;
                     for(vtkIdType kt1=0; kt1< cursor ; kt1++)
                     {
                         vtkIdType thisCurrentPoint = PointIdsArray1[kt1];
-                        temp_val = vtk_node_data->GetTuple(PointIdsArray1[kt1]);
+                        vtk_node_data->GetTuple(PointIdsArray1[kt1],temp_val.get());
                         nodevals[j2++] = temp_val[0];
                         in_ds->GetPoint(thisCurrentPoint,temp_coord);
                         for(int dim1=0; dim1<3; dim1++)
@@ -5352,30 +10182,30 @@ int main(void)
                             coords[j1++] = temp_coord[dim1];
                         }
                         int ismemberofobject = ThisObjectsMemberPointIds.count(thisCurrentPoint);
-                        
+
                         if(ismemberofobject!=0)
                         {
                             Cx += (temp_val[0]*temp_coord[0]);
                             Cy += (temp_val[0]*temp_coord[1]);
                             Cz += (temp_val[0]*temp_coord[2]);
                             mass = mass + temp_val[0];
-                            
+
                             if ( temp_coord[0] < LowerLeft_Corner_x )
                                 LowerLeft_Corner_x = temp_coord[0];
                             else if ( temp_coord[0]  > UpperRight_Corner_x )
                                 UpperRight_Corner_x = temp_coord[0];
-                            
+
                             if ( temp_coord[1] < LowerLeft_Corner_y )
                                 LowerLeft_Corner_y = temp_coord[1];
                             else if ( temp_coord[1]  > UpperRight_Corner_y )
                                 UpperRight_Corner_y = temp_coord[1];
-                            
-                            
+
+
                             if ( temp_coord[2] < LowerLeft_Corner_z )
                                 LowerLeft_Corner_z = temp_coord[2];
                             else if ( temp_coord[2]  > UpperRight_Corner_z )
                                 UpperRight_Corner_z = temp_coord[2];
-                            
+
                             if (MinVal > temp_val[0])
                             {
                                 minValNodeID = thisCurrentPoint;
@@ -5391,11 +10221,11 @@ int main(void)
                                 MaxValX = temp_coord[0];
                                 MaxValY = temp_coord[1];
                                 MaxValZ = temp_coord[2];
-                                
+
                             }
                         }
-                        
-                        
+
+
                     }
             //cout<< "cursor loop done .. " << endl;
                     Cx = Cx /mass;
@@ -5403,8 +10233,8 @@ int main(void)
                     Cz = Cz /mass;
                     Point3D currentCeintroid;
 
-                    
-                    
+
+
                     currentCeintroid.x = MaxValX;
                     currentCeintroid.y = MaxValY;
                     currentCeintroid.z = MaxValZ;
@@ -5413,88 +10243,88 @@ int main(void)
 //                    currentCeintroid.y = Cy;
 //                    currentCeintroid.z = Cz;
                     AlltheCentroids.push_back(currentCeintroid);
-                    
-                    
-            
-                    
+
+
+
+
                     //compute the Second Moments.....
                     //cout << "compute the 2. moments.." << endl;
-                    
-                    
+
+
                     double         Ixx=0.0, Iyy=0.0, Izz=0.0, Iyz=0.0, Ixy=0.0, Izx=0.0;
                     double         mx = 0.0, my = 0.0, mz = 0.0;
-                    
+
                     for(long k5 = 0; k5< ThisObjectsMemberPointIds.size(); k5++)
                     {
                         vtkIdType thisCurrentPoint = PointIdsArray[k5];
-                        temp_val = vtk_node_data->GetTuple(thisCurrentPoint);
+                        vtk_node_data->GetTuple(thisCurrentPoint,temp_val.get());
                         in_ds->GetPoint(thisCurrentPoint,temp_coord); //temp_coord[0]=x, [1]=y, [2]=z,
                         mx = temp_coord[0]-Cx;
                         my = temp_coord[1]-Cy;
                         mz = temp_coord[2]-Cz;
-                        
+
                         Ixx += temp_val[0]*mx*mx;
                         Iyy += temp_val[0]*my*my; //(val*pow(my,2)/((float)(objPtr->mass)));
                         Izz += temp_val[0]*mz*mz;//(val*pow(mz,2)/((float)(objPtr->mass)));
                         Iyz += temp_val[0]*my*mz;//(val*my*mz/((float)(objPtr->mass)));
                         Ixy += temp_val[0]*mx*my;//(val*mx*my/((float)(objPtr->mass)));
                         Izx += temp_val[0]*mz*mx;//(val*mz*mx/((float)(objPtr->mass)));
-                        
+
                     }
-                    
+
                     Ixx = Ixx/(mass);
                     Iyy = Iyy/(mass);
                     Izz = Izz/(mass);
                     Iyz = Iyz/(mass);
                     Ixy = Ixy/(mass);
                     Izx = Izx/(mass);
-                    
-                    
+
+
                     // set the cellpoint ids to a new number starting from 0. :)
                     //cout<<"set the cellpoint ids to a new number .." << endl;
                     vtkSmartPointer<vtkIdList> cellPointIds2 = vtkSmartPointer<vtkIdList>::New();
             //cout << "total num of cells in object : " <<  totalnumberofcellsinthisobj << endl;
             //cout << "cell points : " << cellpoints << endl;
                     vtkIdType realpointindex1;
-                    for(unsigned long i = 0; i < totalnumberofcellsinthisobj;i++)
-                    {
-                        in_ds->GetCellPoints(ObjectCellsArray[i], cellPointIds2);
-                        long type;
-                        type = in_ds->GetCellType(0);
-                        for(int j = 0; j < cellpoints;j++)
-                        {
-                            vtkIdType j4 = 0;
-                            realpointindex1 = cellPointIds2->GetId(j);
-                            int notfound =1;
-                            while(notfound)
-                            {
-                                if(PointIdsArray1[j4] == realpointindex1)
-                                {
-                                    notfound  = 0;
-                                }
-                                j4++;
-                                
-                            }
-			    
-                            
-                            connects[j3++] = j4-1;
-                            //
-//                             if ((j3-1)%10000 ==0)
-//                                 cout<<"realpointindex1["<<realpointindex1   <<"] cursor["<<cursor<<"] totalnumberofcellsinthisobj["<<totalnumberofcellsinthisobj<<"] & "   <<"connects["<<j3-1<<"]="<<connects[j3-1]<<endl;
-                        }
-                        // cout<<"after insertnextcell"<<endl;
-                    }
-                    
-                    
-                    delete[] ObjectCellsArray;
+//                    for(unsigned long i = 0; i < totalnumberofcellsinthisobj;i++)
+//                    {
+//                        in_ds->GetCellPoints(ObjectCellsArray[i], cellPointIds2);
+//                        long type;
+//                        type = in_ds->GetCellType(0);
+//                        for(int j = 0; j < cellpoints;j++)
+//                        {
+//                            vtkIdType j4 = 0;
+//                            realpointindex1 = cellPointIds2->GetId(j);
+//                            int notfound =1;
+//                            while(notfound)
+//                            {
+//                                if(PointIdsArray1[j4] == realpointindex1)
+//                                {
+//                                    notfound  = 0;
+//                                }
+//                                j4++;
+
+//                            }
+
+
+//                            connects[j3++] = j4-1;
+//                            //
+////                             if ((j3-1)%10000 ==0)
+////                                 cout<<"realpointindex1["<<realpointindex1   <<"] cursor["<<cursor<<"] totalnumberofcellsinthisobj["<<totalnumberofcellsinthisobj<<"] & "   <<"connects["<<j3-1<<"]="<<connects[j3-1]<<endl;
+//                        }
+//                        // cout<<"after insertnextcell"<<endl;
+//                    }
+
+
+//                    delete[] ObjectCellsArray;
 //                    ObjectCellsArray = NULL;
-                    
+
                     /********************** Output track file ***********************/
                     //cout<<"inside Output track"<<endl;
                     ofstream Trakfile;
-                    
+
                     long volume = thisObjectsVolume;
-                    
+
                     if(firstobj ==0)
                     {
                         //cout<<"inside if. firstobj= " <<firstobj <<endl;
@@ -5503,7 +10333,7 @@ int main(void)
                     else
                     {
                         Trakfile.open(trakfile1.c_str(),ofstream::out | ofstream::app);
-                        
+
                     }
                     Trakfile<< mass << "   "<<volume<< "   " << Cx <<  "   " <<Cy << "   "<<Cz << "   "<< LowerLeft_Corner_x <<"   ";
                     Trakfile<<LowerLeft_Corner_y<< "   "   <<LowerLeft_Corner_z<< "   " <<UpperRight_Corner_x << "   " ;
@@ -5511,18 +10341,18 @@ int main(void)
                     Trakfile.close();
 
                     /********************** OutputAttribute file ***********************/
-                    
-                    
-                    
-                    
+
+
+
+
                     FILE *fpout;
                     //int rc;
                     //char buffer[256];
                     char outAttr[256];
                     strcpy(outAttr,attributeFile.c_str());
                     //cout<<"outAttr is: "<<outAttr<<"!!!!!!!!"<<endl;
-                    
-                    
+
+
                     if(firstobj ==0)
                     {
                         //cout<<"inside if. firstobj= " <<firstobj <<endl;
@@ -5533,10 +10363,10 @@ int main(void)
                     {
                         if((fpout = fopen(outAttr, "a"))==NULL)
                             cout << "cannot open outAttr file to write\n";
-                        
+
                     }
-                    
-    
+
+
                     // cout<<"INSIDE THE WHILE LOOP"<<endl;
                     fprintf(fpout,"------------------------------------------------\n");
                     fprintf(fpout,"object %ld attributes:\n", firstobj);
@@ -5557,17 +10387,21 @@ int main(void)
                             Ixx, Iyy, Izz);
                     fprintf(fpout,"Ixy = %f\nIyz = %f\nIzx = %f\n",
                             Ixy, Iyz, Izx);
-                    
+
                     fclose(fpout);
-                    
-                    
-                    
+
+
+
                     /********************** Output OutputOcd file ***********************/
                     //Change output in this file would influence the ReadOct function in feature tracking
-                    
+
                     FILE           *fpout1;
+                    FILE           *fpout2;
                     char OutOcd[256];
+                    char OutOcdClean[256];
+
                     strcpy(OutOcd,OutputOcdfile.c_str());
+                    strcpy(OutOcdClean,OutputOcdCleanfile.c_str());
                     //cout<<"outAttr is: "<<outAttr<<"!!!!!!!!"<<endl;
 
 
@@ -5589,152 +10423,190 @@ int main(void)
 //                    fprintf(fpout1,"%ld\n", firstobj);
 //                    fprintf(fpout1,"%ld %f %f %f %f\n", thisObjectsVolume, (float) mass, (float) Cx, (float) Cy, (float) Cz );
 //                    fprintf(fpout1,"%f %f %f %f %f %f\n", (float) Ixx, (float) Iyy, (float) Izz, (float) Ixy, (float) Iyz, (float) Izx);
-                    
+
                     if(firstobj ==0)
                     {
                         //cout<<"inside if. firstobj= " <<firstobj <<endl;
                         if((fpout1 = fopen(OutOcd, "w"))==NULL)
                             cout << "cannot open outAttr file to write\n";
-                        fprintf(fpout1,"******uocd_unfiltered*****\n");
-                        fprintf(fpout1,"%d\n",currentTime);
-//                        fprintf(fpout1,"%ld\n", firstobj);//this should be total number of object... we do not really need this. And adding this to the file requires a full obj loop. Not necessary... look into this.
+//                        fprintf(fpout1,"******uocd_unfiltered*****\n");
+//                        fprintf(fpout1,"%d\n",currentTime);
+                        fpout2 = fopen(OutOcdClean, "w");
                     }
                     else
                     {
                         if((fpout1 = fopen(OutOcd, "a"))==NULL)
                             cout << "cannot open outAttr file to write\n";
-                        
+                        fpout2 = fopen(OutOcdClean, "a");
+
                     }
-                    
+
+
+
                     fprintf(fpout1,"%ld\n", firstobj);
                     fprintf(fpout1,"%ld %f %f %f %f\n", thisObjectsVolume, (float) mass, (float) Cx, (float) Cy, (float) Cz );
                     fprintf(fpout1,"%f %f %f %f %f %f\n", (float) Ixx, (float) Iyy, (float) Izz, (float) Ixy, (float) Iyz, (float) Izx);
-                    
+
+
+                    FILE  *fpout_seperatedCenter;
+
+                    char OutOcdSeperatedCenter[256];
+                    string OcdSeperatedStructurefile;
+                    string OcdSeperatedCenterfile;
+                    OcdSeperatedCenterfile = base_GeneratedTrackFileNameOriginal + "Seperated Structures/"+ "Frame"+currenttimevalue +"_Center_" + std::to_string(i) +".uocd";
+
+                    strcpy(OutOcdSeperatedCenter,OcdSeperatedCenterfile.c_str());
+
+                    if((fpout_seperatedCenter = fopen(OutOcdSeperatedCenter, "w"))==NULL)
+                            cout << "cannot open outAttrSeperated file to write\n";
                     for(long k5 = 0; k5< ThisObjectsMemberPointIds.size(); k5++)
                     {
                         vtkIdType thisCurrentPoint = PointIdsArray[k5];
-                        temp_val = vtk_node_data->GetTuple(thisCurrentPoint);
+                        vtk_node_data->GetTuple(thisCurrentPoint,temp_val.get());
                         in_ds->GetPoint(thisCurrentPoint,temp_coord); //temp_coord[0]=x, [1]=y, [2]=z,
-                        
+
+
+
+//                        v[0] = (float) currentPointVal;
+//                        v[1] = u_vals_Vec[z][y][x];
+//                        v[2] = v_vals_Vec[z][y][x];
+//                        v[3] = 0;
+//                        v[4] = salt_vals_Vec[z][y][x];
+//                        v[5] = temp_vals_Vec[z][y][x];
+//                        v[6] = 0;
+//                        v[7] = 0;
+//                        v[8] = 0;
                         //Ocdfile<<thisCurrentPoint<<  "     "<<temp_coord[0]<< "     "<<temp_coord[1]<< "     "<<temp_coord[2]<< "     "<< temp_val[0]  <<endl;
 //                        fprintf(fpout1,"%6lld %9.6f %9.6f %9.6f  %f\n", thisCurrentPoint, (float) temp_coord[0], (float) temp_coord[1], (float) temp_coord[2], (float) temp_val[0]);
-                        if(dataType == Tensor_data)
-                            fprintf(fpout1,"%6lld %9.6f %9.6f %9.6f  %f %f %f %f %f %f\n", thisCurrentPoint, (float) temp_coord[0], (float) temp_coord[1], (float) temp_coord[2], (float) temp_val[0], (float)temp_val[1],(float)temp_val[2],(float)temp_val[3],(float)temp_val[4],(float)temp_val[5]);
-                        else if(dataType == Scalar_data)
+
+
+
+
+                        if(dataType == Tensor_data){
+                            fprintf(fpout1,"%6lld %9.6f %9.6f %9.6f  %f %f %f %f %f %f\n", thisCurrentPoint, (float) temp_coord[0], (float) temp_coord[1], (float) temp_coord[2], (float) temp_val[0], (float)temp_val[1],(float)temp_val[2],(float)temp_val[3],(float)temp_val[4],(float)temp_val[5]
+                                    );
+                            fprintf(fpout2,"%6lld %9.6f %9.6f %9.6f  %f %f %f %f %f %f\n", thisCurrentPoint, (float) temp_coord[0], (float) temp_coord[1], (float) temp_coord[2], (float) temp_val[0], (float)temp_val[1],(float)temp_val[2],(float)temp_val[3],(float)temp_val[4],(float)temp_val[5]
+                                    );
+                        }
+                        else if(dataType == Scalar_data){
                             fprintf(fpout1,"%6lld %9.6f %9.6f %9.6f  %.9f\n", thisCurrentPoint, (float) temp_coord[0], (float) temp_coord[1], (float) temp_coord[2], (float) temp_val[0]);
-                        
+                            fprintf(fpout2,"%6lld %9.6f %9.6f %9.6f  %.9f\n", thisCurrentPoint, (float) temp_coord[0], (float) temp_coord[1], (float) temp_coord[2], (float) temp_val[0]);
+                        }
+
+
                         //******Also change the ReadOct function******
                     }
-                    
+                    vector<pair<cv::Point3d,double>>::iterator centerIter = eddyCenter_inDepth.begin();
+                    while(centerIter != eddyCenter_inDepth.end()){
+                        cv::Point3d centerCoord = (*centerIter).first;
+                        double centerRadius = (*centerIter).second;
+                        fprintf(fpout_seperatedCenter,"%9.6f %9.6f %9.6f %f %f %f\n", centerCoord.x,centerCoord.y,centerCoord.z,centerRadius,velocityCenter_onSurface.x, velocityCenter_onSurface.y);
+                        centerIter++;
+                    }
                     fclose(fpout1);
-                    
-                    
+                    fclose(fpout2);
+                    fclose(fpout_seperatedCenter);
+
+
                     //------isosurface related ----------------------------------
-                    
+
                     //vtkUnstructuredGrid *out_ds1 = vtkUnstructuredGrid::New();
 
-                    vtkSmartPointer<vtkUnstructuredGrid> out_ds1 = vtkSmartPointer<vtkUnstructuredGrid>::New();
-                    //--------Below is Setoutfield -----
-                    vtkSmartPointer<vtkFloatArray> pcoords = vtkSmartPointer<vtkFloatArray>::New();
-                    pcoords->SetNumberOfComponents(nspace);
-                    pcoords->SetNumberOfTuples(cursor);
-                    float *temp_coord1 = new float[3];
-                    unsigned long n_connect = 0;
-                    unsigned long n_coords = 0;
-                    for(unsigned long i = 0; i <  cursor; i ++)
-                    {
-                        for(int ii = 0 ; ii < nspace;ii++)
-                        {
-                            temp_coord1[ii] = coords[n_coords++];
-                        }
-                        pcoords->SetTuple3(i,(double)temp_coord1[0],(double)temp_coord1[1],(double)temp_coord1[2]);
-                    }
-                    
-                    out_ds1->Allocate(totalnumberofcellsinthisobj*cellpoints);// this step is important
-                    vtkSmartPointer<vtkPoints> points = vtkSmartPointer<vtkPoints>::New();
-                    points->SetData(pcoords);
-                    
-                    vtkSmartPointer<vtkFloatArray> pdata = vtkSmartPointer<vtkFloatArray>::New();
-                    pdata->SetNumberOfTuples(cursor);
+//                    vtkSmartPointer<vtkUnstructuredGrid> out_ds1 = vtkSmartPointer<vtkUnstructuredGrid>::New();
+//                    //--------Below is Setoutfield -----
+//                    vtkSmartPointer<vtkFloatArray> pcoords = vtkSmartPointer<vtkFloatArray>::New();
+//                    pcoords->SetNumberOfComponents(nspace);
+//                    pcoords->SetNumberOfTuples(cursor);
+//                    shared_ptr<float[]>temp_coord1(new float[3]);
+////                    float *temp_coord1 = new float[3];
+//                    unsigned long n_connect = 0;
+//                    unsigned long n_coords = 0;
+//                    for(unsigned long i = 0; i <  cursor; i ++)
+//                    {
+//                        for(int ii = 0 ; ii < nspace;ii++)
+//                        {
+//                            temp_coord1[ii] = coords[n_coords++];
+//                        }
+//                        pcoords->SetTuple3(i,temp_coord1[0],temp_coord1[1],temp_coord1[2]);
+//                    }
 
-                    
-                    double *temp_data = new double;
-                    for(unsigned long i = 0; i < cursor; i++)
-                    {
-                        *temp_data = nodevals[i];
-                        pdata->SetTuple1(i,(double)*temp_data);
-                    }
+//                    out_ds1->Allocate(totalnumberofcellsinthisobj*cellpoints);// this step is important
+//                    vtkSmartPointer<vtkPoints> points = vtkSmartPointer<vtkPoints>::New();
+//                    points->SetData(pcoords);
 
-                    
-                    vtkIdType *temp_connect = new vtkIdType[cellpoints];     //int n_connect = 0;
-                    
-                    for(unsigned long i = 0; i < totalnumberofcellsinthisobj;i++)
-                    {
-                        for(int j = 0; j < cellpoints;j++)
-                        {
-                            temp_connect[j] = connects[n_connect++];
-                            //cout<<"temp_connect["<<j<<"]="<<temp_connect[j]<<endl;
-                        }
-                        out_ds1->InsertNextCell(data_cellType, (vtkIdType) cellpoints,temp_connect);
-                    }
-                    // cout<<"---------AFter InsertNextCell --------- "<<endl;
-                    
-                    out_ds1->SetPoints(points);
-                    out_ds1->GetPointData()->SetScalars(pdata);
+//                    vtkSmartPointer<vtkFloatArray> pdata = vtkSmartPointer<vtkFloatArray>::New();
+//                    pdata->SetNumberOfTuples(cursor);
 
-                   // points->Delete();
-                  //  pcoords->Delete();
-                   // pdata->Delete();
+//                    //Data used to extract isosurface
+//                    double temp_data;
+//                    for(unsigned long i = 0; i < cursor; i++)
+//                    {
+//                        temp_data =nodevals[i];
+//                        pdata->SetTuple1(i,temp_data);
+//                    }
+
+//                    shared_ptr<vtkIdType[]> temp_connect(new vtkIdType[cellpoints]);
+//                    vtkIdType *temp_connect = new vtkIdType[cellpoints];     //int n_connect = 0;
+
+//                    for(unsigned long i = 0; i < totalnumberofcellsinthisobj;i++)
+//                    {
+//                        for(int j = 0; j < cellpoints;j++)
+//                        {
+//                            temp_connect[j] = connects[n_connect++];
+//                            //cout<<"temp_connect["<<j<<"]="<<temp_connect[j]<<endl;
+//                        }
+//                        out_ds1->InsertNextCell(data_cellType, (vtkIdType) cellpoints,temp_connect.get());
+//                    }
+//                    // cout<<"---------AFter InsertNextCell --------- "<<endl;
+
+//                    out_ds1->SetPoints(points);
+//                    out_ds1->GetPointData()->SetScalars(pdata);
+
+//                   // points->Delete();
+//                  //  pcoords->Delete();
+//                   // pdata->Delete();
                     vtkSmartPointer<vtkXMLUnstructuredGridWriter> writer0 = vtkSmartPointer<vtkXMLUnstructuredGridWriter>::New();
-                    writer0->SetFileName( "./cell_object.vtu" );
-                    writer0->SetInputData(out_ds1);
-                    writer0->Write();
+//                    writer0->SetFileName( "./cell_object.vtu" );
+//                    writer0->SetInputData(out_ds1);
+//                    writer0->Write();
 
-                    
+
                     //-------- End of SeetOutfield content
-                    
+
                     //SetOutField(out_ds1,cursor,totalnumberofcellsinthisobj,nspace,cellpoints,coords,nodevals,connects);
 
-                    
+
+                    vtkSmartPointer<vtkPolyData> outpoly2 = vtkPolyData::New();
+                    //-------Isosurface
                     //vtkSmartPointer<vtkDiscreteMarchingCubes> isosurface = vtkSmartPointer<vtkDiscreteMarchingCubes>::New();
-                    vtkSmartPointer<vtkContourFilter> isosurface = vtkSmartPointer<vtkContourFilter>::New();
-                    
-                    //vtkContourFilter *isosurface = vtkContourFilter::New();
-                    isosurface->SetInputData(out_ds1);
-                    //isosurface->GenerateTriangles(5);
-                    isosurface->SetNumberOfContours(1);
-                    isosurface->SetValue(0,thresh1);//thresh1
-                    isosurface->Update();
-                    vtkSmartPointer<vtkPolyData> outpoly2 = vtkSmartPointer<vtkPolyData>::New();
-                    outpoly2 = isosurface->GetOutput();
+//                    vtkNew<vtkContourFilter> isosurface;
+
+//                    //vtkContourFilter *isosurface = vtkContourFilter::New();
+//                    isosurface->SetInputData(out_ds1);
+//                    isosurface->GenerateTrianglesOn();
+//                    isosurface->SetNumberOfContours(1);
+//                    isosurface->SetValue(0,0);//thresh1
+//                    isosurface->Update();
+//                    outpoly2 = isosurface->GetOutput();
+                    //-------Just the outer surface
+//                    vtkNew<vtkGeometryFilter> outerSurface;
+
+//                    outerSurface->SetInputData(out_ds1);
+//                    outerSurface->Update();
+//                    outpoly2 = outerSurface->GetOutput();
+
+
                     //outpoly2->Update();
-                    isosurface->Update();
-      
-                    vtkSmartPointer<vtkPolyDataWriter> writer1 = vtkSmartPointer<vtkPolyDataWriter>::New();
-                    writer1->SetFileName( "./cell_object_1.vtp" );
-                    writer1->SetInputData(outpoly2);
-                    writer1->Write();
-                    
-                    //outpoly->Register(NULL);
-                    
-                    //---- just to test -----
-                    
-//                      cout<<"outpoly->GetNumberOfPoints():["<<outpoly->GetNumberOfPoints()<<"]"<<endl;
-                    // Write file
-
-
-
+                    //isosurface->Update();
 
 //                    vtkSmartPointer<vtkPolyDataWriter> writer1 = vtkSmartPointer<vtkPolyDataWriter>::New();
-//                    writer1->SetFileName( "./polygons.vtp" );
-//                    writer1->SetInputConnection( isosurface->GetOutputPort() );
+//                    writer1->SetFileName( "./cell_object_1.vtp" );
+//                    writer1->SetInputData(outpoly2);
 //                    writer1->Write();
-//                  readnetcdffile
 
 
 
-//                    ----- just to test ----
-                    
+
                     double p = 0;
                     ofstream pfile;
                     if(firstobj ==0)
@@ -5752,8 +10624,8 @@ int main(void)
                         cout<<"ExtractSurf:cannot open "<<mypolyfile<<endl;
                         return 0;
                     }
-                    
-                    
+
+
                     vtkSmartPointer<vtkIdList> listconnect = vtkSmartPointer<vtkIdList>::New();
                     //vtkIdList *listconnect = vtkIdList::New();
                     pfile<<155<<" "<<155<<" "<<155<<endl;
@@ -5765,14 +10637,14 @@ int main(void)
                     //Sedat      cout<<" outpoly->GetNumberOfPoints() : "<<outpoly->GetNumberOfPoints()<<endl;
                     pfile.setf(ios::fixed,ios::floatfield);
                     pfile<<setprecision(6);
-                    double *temp_coord_array = new double[3];
+                    double temp_coord_array[3];
                     vtkIdType point_index;
 
                     for(long k3=0; k3<outpoly2->GetNumberOfPoints(); k3++)
                     {
-                        temp_coord_array = outpoly2->GetPoint(k3);
+                        outpoly2->GetPoint(k3,temp_coord_array);
                         point_index = in_ds->FindPoint(temp_coord_array[0],temp_coord_array[1],temp_coord_array[2]);
-                        temp_iso_val = vtk_node_data->GetTuple(point_index);
+                        vtk_node_data->GetTuple(point_index,temp_iso_val.get());
                         for(int k4 = 0; k4 <nspace;k4++)
                         {
                             pfile<<temp_coord_array[k4] <<" ";
@@ -5799,12 +10671,12 @@ int main(void)
                     pfile<<0<<endl<<endl;
                     //#cout << "finished writing poly file\n";
                     pfile.close();
-                    delete temp_data;
-                    delete[] connects;
-                    delete[] coords;
-                    delete[] nodevals;
-                    delete[] temp_coord1;
-                    delete[] temp_connect;
+//                    delete temp_data;
+//                    delete[] connects;
+//                    delete[] coords;
+//                    delete[] nodevals;
+//                    delete[] temp_coord1;
+//                    delete[] temp_connect;
 //                    delete[] temp_coord_array;
 //                    delete[] temp_iso_val;
 
@@ -5815,11 +10687,19 @@ int main(void)
 //                    temp_coord1= NULL;
 //                    temp_connect= NULL;
                 }
-            }
-            
+                else
+                    successSet3.push_back(i);
         }
 
-
+        double failutreResult[7]={0,0,0,0,0,0,0};
+        vector<vector<pair<int,double>>>::iterator failureIter=failureReasonSet.begin();
+        while(failureIter!=failureReasonSet.end()){
+            vector<pair<int,double>> failure4ThisEddy= (*failureIter);
+            for (int pp=0; pp<failure4ThisEddy.size();pp++){
+                failutreResult[failure4ThisEddy.at(pp).first]++;
+            }
+            failureIter++;
+        }
 
 
         cout<<"Segmentation is completed.. Total number of extracted objects in this time step is: [" <<firstobj+1<<"]" <<endl;
@@ -5934,8 +10814,11 @@ int main(void)
         fp.close();
         fclose(fpout4);
         fclose(fpout);
+        fclose(fpout3);
+        fclose(fpout5);
+        fclose(fpout_Failure);
         
-     	cout << endl << "trakfile1.c_str() : " << trakfile1.c_str() << endl;
+        cout << endl << "trakfile1.c_str() : " << trakfile1.c_str() << endl;
         if( remove( trakfile1.c_str() ) != 0 )
             perror( "Error deleting file" );
         if ( rename(trakfile2.c_str() , trakfile1.c_str()) == 0 )
@@ -5946,12 +10829,12 @@ int main(void)
         
         //-----------------_______________________-------------------
         
-        in_ds->Delete();
-        in_ds = NULL;
+//        in_ds->Delete();
+//        in_ds = NULL;
         
         char mypolyfile1[256];
         sprintf(mypolyfile1, mypolyfile.c_str());
-        //   BeginObjSegment(in_ds,&outDS,cell_type,currentTime, (double) thresh1, listfile,SmallestObjVol, TimePrecision, /* doVolRender*/1,mypolyfile1,thresh1, thresh2, InitialtimeStep,TimeIncrement, deltaxval, deltayval, deltazval);        
+        //   BeginObjSegment(in_ds,&outDS,cell_type,currentTime, (double) thresh1, listfile,SmallestObjVol, TimePrecision, /* doVolRender*/1,mypolyfile1,thresh1, thresh2, InitialtimeStep,TimeIncrement, deltaxval, deltayval, deltazval);
         
         
         int finished = 0;
@@ -5960,6 +10843,7 @@ int main(void)
         cout<< "Before the Tracking !! "<<endl;
         
         cout<< "finished = "<<  finished<< " & deltaxval="<< deltaxval<<" deltayval="<<deltayval<<" deltazval="<< deltazval<<" InitialtimeStep="<<InitialtimeStep <<" currentTime="<<currentTime<<endl;
+
         int a = BeginFeatureTrack(base_GeneratedTrackFileName, currenttimevalue, mypolyfile1,finished,deltaxval, deltayval, deltazval,listfile,InitialtimeStep ,TimeIncrement ,currentTime, TimePrecision);
         
         cout<< "After the Tracking !! "<<endl;
@@ -5970,13 +10854,14 @@ int main(void)
         //time(&end1);
         //cout << "Time elapsed: " << difftime(end, begin) << " seconds in currentTime["<<currentTime<<"]"<< endl;
         cout << "Time elapsed: " << elapsed_secs << " seconds for computing the "<<currentTime<<"th time step!"<< endl;
-        delete[] ProcessedCell;
+//        delete[] ProcessedCell;
+        delete[] zLevelData;
 //        ProcessedCell = NULL;
         
-        
+
     } // end of currenttime loop
 
-
+    nc_close(ncid);
     
 }//end of main
 

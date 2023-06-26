@@ -2,8 +2,16 @@ cmake_minimum_required(VERSION 2.6)
 
 PROJECT(FT)
 SET (CMAKE_BUILD_TYPE Debug)
+set(CMAKE_CXX_STANDARD 17)
+SET(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+
 
 set (VTK_DIR "~/data/vtk-build")
+set (OpenCV_DIR "~/data/openCV/build")
+set (NETCDF_INCLUDE_DIR "~/usr/include")
+
+
 
 IF(NOT VTK_BINARY_DIR)
 FIND_PACKAGE(VTK COMPONENTS)
@@ -32,7 +40,7 @@ else()
 endif()
 
 
-find_library(NETCDF_C_LIB netcdf DOC "NetCDF C library" PATHS $ENV{NETCDF_LIB} /usr/lib /usr/lib64 $ENV{SARA_NETCDF_LIB})
+find_library(NETCDF_C_LIB netcdf DOC "NetCDF C library" PATHS $ENV{NETCDF_LIB} /usr/lib /usr/lib64 /usr/include $ENV{SARA_NETCDF_LIB})
 
 if(NETCDF_C_LIB)
   set(NETCDF_LIBS ${NETCDF_C_LIB})

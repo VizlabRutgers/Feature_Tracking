@@ -1,4 +1,5 @@
-
+#ifndef OBJECTSEGMENT_H
+#define OBJECTSEGMENT_H
 #include <limits.h>
 //#include <vtkDataSet.h>
 #include <vtkUnstructuredGrid.h>
@@ -2067,7 +2068,7 @@ int Segmentation(vtkDataSet *in_ds,vtkDataSet **outDS, InpObject<T> *inPtr,int n
 
 
 
-
+#endif
 
 
 
