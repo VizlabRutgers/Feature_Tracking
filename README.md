@@ -21,7 +21,7 @@ https://vizlab.rutgers.edu/
 This program is a C++ program developed in linux system. We strongly recommend you to compile the code in linux system to avoid some problems.
 
 Validated environment:
-Ubuntu-18.04\n
+Ubuntu-18.04/n
 CMake-3.14\n
 gcc-7.5.0\n
 Hdf5-1.14.1\n
