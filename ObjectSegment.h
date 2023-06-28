@@ -1,5 +1,4 @@
-#ifndef OBJECTSEGMENT_H
-#define OBJECTSEGMENT_H
+
 #include <limits.h>
 //#include <vtkDataSet.h>
 #include <vtkUnstructuredGrid.h>
@@ -738,7 +737,7 @@ void SetOutField(vtkUnstructuredGrid *out_ds, unsigned long nnodes, unsigned lon
     //cout << "End of SetOutField\n";
 }
 
-/*
+
 template<class T>
 int ExtractSurf(vtkDataSet *in_ds,InpObject<T> *inPtr,vtkDataSet **outDS, char* mypolyfile,int nspace,int cellpoints)
 {
@@ -772,12 +771,12 @@ int ExtractSurf(vtkDataSet *in_ds,InpObject<T> *inPtr,vtkDataSet **outDS, char* 
     double maxAr=0.0,minAr=9999999.99;
     ofstream afile;
     
-    cout<<"\nmypolyfile has value"<<mypolyfile;
+    /*cout<<"\nmypolyfile has value"<<mypolyfile;
      std::string temp_file(mypolyfile);
      int dpos=temp_file.find('.');
      temp_file=temp_file.substr(0,dpos+1);
      cout<<"\ntemp_file has value"<<temp_file;
-     temp_file.append("addl");
+     temp_file.append("addl");*/
    // cout<<" objPtr value[ "<<objPtr<<" ] "<<endl;
     
     while (objPtr)
@@ -860,7 +859,7 @@ int ExtractSurf(vtkDataSet *in_ds,InpObject<T> *inPtr,vtkDataSet **outDS, char* 
        // cout<<"------  Inside ExtractSurf -------  [ 2 ]   ------- "<<endl;
         
         vtkContourFilter *isosurface = vtkContourFilter::New();
-        isosurface->SetInputConnection( in_ds );
+        isosurface->SetInputData(in_ds);
         isosurface->SetNumberOfContours(1);
         //SEDAT look at here, thresholds.....
         isosurface->SetValue(0,inPtr->thrVal); // from Sedat: some web on internet says that this is double type sometimes it says this is float. which one? :). Currently it is double.
@@ -869,10 +868,10 @@ int ExtractSurf(vtkDataSet *in_ds,InpObject<T> *inPtr,vtkDataSet **outDS, char* 
         
         //#cout << "isosurface->GetValue() "  << isosurface->GetValue(0) << endl;
         //*outDS = (vtkDataSet *)isosurface->GetOutput();
+        isosurface->Update();
         vtkPolyData *outpoly = isosurface->GetOutput();
        // cout<<"------  Inside ExtractSurf -------  [ 3.5 ]   ------- "<<endl;
         //cout<<"test 1"<<endl;
-        outpoly->Update();
        // cout<<"------  Inside ExtractSurf -------  [ 4 ]   ------- "<<endl;
       //  cout<<"outpoly->GetNumberOfPoints():["<<outpoly->GetNumberOfPoints()<<"]"<<endl;
         //cout<<"test 2"<<endl;
@@ -960,7 +959,7 @@ int ExtractSurf(vtkDataSet *in_ds,InpObject<T> *inPtr,vtkDataSet **outDS, char* 
     return METHOD_SUCCESS;
 }
 
-*/
+
 
 template <class T>
 int FindMoment( InpObject<T> *inPtr,int cellpoints )
@@ -1952,10 +1951,10 @@ void FindClusters( InpObject<T> *inPtr)  // this is to use a generic way for gro
 
 
 
-/*
+
 
 template <class T>
-int Segmentation(vtkDataSet *in_ds,vtkDataSet **outDS, InpObject<T> *inPtr,int nspace, unsigned long nnodes, unsigned long ncells,int cellpoints, float *coord_array,unsigned long *node_conn_array, double *node_data,double thresh,std::string listfile, int timeFrame, char* mypolyfile, int smallest_vol,int precision,bool dovolren string volfile ,int color_Method,int nncomp)
+int Segmentation(vtkDataSet *in_ds,vtkDataSet **outDS, InpObject<T> *inPtr,int nspace, unsigned long nnodes, unsigned long ncells,int cellpoints, float *coord_array,unsigned long *node_conn_array, double *node_data,double thresh,std::string listfile, int timeFrame, char* mypolyfile, int smallest_vol,int precision,bool dovolren/*string volfile*/,int color_Method,int nncomp)
 {
     cout<<"inside Segmentation  "<<endl;
     cout<< "SEDAT1: mypolyfile is: "<< mypolyfile << endl;
@@ -2011,7 +2010,7 @@ int Segmentation(vtkDataSet *in_ds,vtkDataSet **outDS, InpObject<T> *inPtr,int n
             break;
         case 1: SetColMass( inPtr, &absMin, &absMax, ADAPTIVE);
             break;
-        case 2: /*setColRandom(inPtr,&absMin,&absMax,ADAPTIVE);
+        case 2: /*setColRandom(inPtr,&absMin,&absMax,ADAPTIVE);*/
             break;
     }
     string label;
@@ -2023,7 +2022,7 @@ int Segmentation(vtkDataSet *in_ds,vtkDataSet **outDS, InpObject<T> *inPtr,int n
     /* if(timeFrame==0)
      sprintf(mypolyfile, "%s",label.c_str());
      else
-     {
+     {*/
     string buf=label+precision_time( timeFrame, precision);
     sprintf(mypolyfile, buf.c_str());
     //1}
@@ -2054,21 +2053,21 @@ int Segmentation(vtkDataSet *in_ds,vtkDataSet **outDS, InpObject<T> *inPtr,int n
     
     OutputAttribute(inPtr->pobject, outFile);
     OutputTrak(inPtr->pobject, outFile, timeFrame);
-    OutputOcd(inPtr, outFile, timeFrame,dovolren,cellpoints/*volfile,in_field);
+    OutputOcd(inPtr, outFile, timeFrame,dovolren,cellpoints/*volfile,in_field*/);
     //assert(OutputAttribute(inPtr->pobject, outFile));
     //assert(OutputTrak(inPtr->pobject, outFile, timeFrame));
-    //assert(OutputOcd(inPtr, outFile, timeFrame,dovolren,cellpoints/*volfile,in_field));
+    //assert(OutputOcd(inPtr, outFile, timeFrame,dovolren,cellpoints/*volfile,in_field*/));
     //cout<<"Before OUTPUTPACKET method"<<endl;
     //     assert( OutputPacket( inPtr->packets, outFile, timeFrame));
     //cout<<"After OUTPUTPACKET method"<<endl;
     
     return METHOD_SUCCESS;
 }
-*/
 
 
 
-#endif
+
+
 
 
 

@@ -4,7 +4,6 @@
 #include <fstream>
 #include <string>
 #include <algorithm>
-#include <vector>
 using namespace std;
 
 struct Consts 
@@ -28,19 +27,19 @@ the tracking information table will not be written */
 };
 
 
-//#define Consts::MAXSPLIT  20
-//#define Consts::RADIUS   1
-//#define Consts::FRAMEDIST 10.0
-//#define Consts::NODEDIST  2.0
-//#define Consts::MAXOBJS  1000
-//#define Consts::MAXLEN  100
-//#define Consts::TRAKTABLE_MAXLEN  4096
-//#define Consts::DEFAULT_TOLERANCE  0.0
-//#define Consts::YES  true
-//#define Consts::NO  false
-//#define Consts::DEFAULT_TIMESTEP_NUM  200
-//#define Consts::WriteTrackInfo  true
-
+/*#define Consts::MAXSPLIT  20
+#define Consts::RADIUS   1
+#define Consts::FRAMEDIST 10.0
+#define Consts::NODEDIST  2.0
+#define Consts::MAXOBJS  1000
+#define Consts::MAXLEN  100
+#define Consts::TRAKTABLE_MAXLEN  4096
+#define Consts::DEFAULT_TOLERANCE  0.0
+#define Consts::YES  true
+#define Consts::NO  false
+#define Consts::DEFAULT_TIMESTEP_NUM  200
+#define Consts::WriteTrackInfo  true
+*/
 
  
 
@@ -87,26 +86,22 @@ struct TrackObject
      bool issplit;
      bool isnew;
      bool flag;
-     int Pac_ID;
      vector<int> parents; // seq_wr+no_init
      vector<int> children; // seq_wr+no_init 
-     TrackObject (): volume(-1), mass(-1), existent(Consts::NO), isnew(Consts::NO), ismerge(Consts::NO), issplit(Consts::NO),flag(Consts::NO), Pac_ID(-1)
+     TrackObject (): volume(-1), mass(-1), existent(Consts::NO), isnew(Consts::NO), ismerge(Consts::NO), issplit(Consts::NO),flag(Consts::NO) 
      {
      }
      ~TrackObject()
      {
-         vector<int>().swap(parents);
-         vector<int>().swap(children);
-     }
+         vector<int>().swap(parents); 
+         vector<int>().swap(children); 
+     } 
 };
 
 struct ucdNode
 {
      int ObjID;
-     int NodeID;
-     double xCoord;
-     double yCoord;
-     double zCoord;
+     int NodeID;    
      inline friend int operator< (ucdNode t1, ucdNode t2) 
      {
          return (t1.NodeID<t2.NodeID?1:0);
@@ -121,7 +116,6 @@ struct ucdNode
 struct ObjectExtends
 {
      long ObjVol; // the volume of the object
-     int objSurfVol;
      double l_x; // lower left cordner coordinate of the surrounding boxof the object
      float l_y;
      float l_z;
@@ -144,12 +138,6 @@ struct Frame
   //allocated in ReadTrak() with resize(), do not use push_back()!
   // objVols.size() is the number of objects in this frame
      vector<ucdNode> nodes; 
-     double xMax=__DBL_MIN__;
-     double xMin=__DBL_MAX__;
-     double yMax=__DBL_MIN__;
-     double yMin=__DBL_MAX__;
-     double zMax=__DBL_MIN__;
-     double zMin=__DBL_MAX__;
 
   // [numNodes], noext+rand_wr, 
   //allocated in ReadTrak() with resize(), do not use push_back()!
@@ -223,11 +211,8 @@ struct TMPNODE
      vector<int> Pre;
   //ext+rand_wr, extend with resize(n,-1) 
 
-     TMPNODE()
+     TMPNODE():ObjInd(-1),Pre(vector<int>(Consts::MAXSPLIT,-1)),Suc(vector<int>(Consts::MAXSPLIT,-1)) 
      {
-         this->ObjInd = -1;
-         this->Suc = vector<int>(Consts::MAXSPLIT,-1);
-         this->Pre = vector<int>(Consts::MAXSPLIT,-1);
      }
      ~TMPNODE()
      {

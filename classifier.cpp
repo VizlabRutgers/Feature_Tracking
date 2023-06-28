@@ -1,11 +1,9 @@
 #include "classifier.h"
-#include <stdio.h>
 // constructor
 
 classifier::classifier(Point3D* pPoints, int n, int k, float deltaxval, float deltayval, float deltazval)
 {
  	// get number of classes to classify
-	std::cout<<"classifier created with k = " << k << " and n = " << n << endl; 
 	K = k;
 	N = n;
     Parameter1 = deltaxval;
@@ -133,8 +131,7 @@ void classifier::classification()
 	II.resize(N);
 	A.resize(N);
 	// complexity is: O(N*N*log(N))
-	std::cout<<".. classification running .. " << endl << "N = " << N << endl;
- 	for(i=0; i<N; ++i)
+	for(i=0; i<N; ++i)
 	{
 		std::vector<similarities> V_temp;
 		similarities D_temp;
@@ -266,8 +263,7 @@ bool classifier::run_classification(void)
 	// check K
 	if((K<1)||(K>N))
 	{
-		std::cout<<"Wrong K (number of clusters). Should be in [1, N] but K = " << K <<std::endl;	
-		
+		std::cout<<"Wrong K (number of clusters). Should be in [1, N]"<<std::endl;
 		return false;
 	}
 

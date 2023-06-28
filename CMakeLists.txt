@@ -2,19 +2,11 @@ cmake_minimum_required(VERSION 2.6)
 
 PROJECT(FT)
 SET (CMAKE_BUILD_TYPE Debug)
-set(CMAKE_CXX_STANDARD 17)
-SET(CMAKE_CXX_STANDARD_REQUIRED ON)
-
-
 
 set (VTK_DIR "~/data/vtk-build")
-set (OpenCV_DIR "~/data/openCV/build")
-set (NETCDF_INCLUDE_DIR "~/usr/include")
-
-
 
 IF(NOT VTK_BINARY_DIR)
-FIND_PACKAGE(VTK COMPONENTS)
+FIND_PACKAGE(VTK)
 IF(NOT VTK_DIR)
   MESSAGE(FATAL_ERROR "Please set VTK_DIR.")
 ELSE(NOT VTK_DIR)
@@ -22,7 +14,7 @@ ELSE(NOT VTK_DIR)
 ENDIF(NOT VTK_DIR)
 INCLUDE(${VTK_USE_FILE})
 ENDIF(NOT VTK_BINARY_DIR)
-find_package(OpenCV REQUIRED)
+
 
 FIND_PACKAGE (HDF5)
 INCLUDE_DIRECTORIES (${HDF5_INCLUDE_DIR})
@@ -40,7 +32,7 @@ else()
 endif()
 
 
-find_library(NETCDF_C_LIB netcdf DOC "NetCDF C library" PATHS $ENV{NETCDF_LIB} /usr/lib /usr/lib64 /usr/include $ENV{SARA_NETCDF_LIB})
+find_library(NETCDF_C_LIB netcdf DOC "NetCDF C library" PATHS $ENV{NETCDF_LIB} /usr/lib /usr/lib64 $ENV{SARA_NETCDF_LIB})
 
 if(NETCDF_C_LIB)
   set(NETCDF_LIBS ${NETCDF_C_LIB})
@@ -102,11 +94,8 @@ SET_SOURCE_FILES_PROPERTIES(${FTSrcs} PROPERTIES)
 
 ADD_EXECUTABLE( FT MACOSX_BUNDLE ${FTSrcs} ${FTResources} ${MOCSrcs} ${ResourceSrcs} )
 
-
-
-
 TARGET_LINK_LIBRARIES( FT
-  ${VTK_LIBRARIES}
+  ${VTK_LIBRARIES} 
   #vtkRendering
   #vtkGraphics
   #vtkIO
@@ -116,7 +105,6 @@ TARGET_LINK_LIBRARIES( FT
   #vtkHybrid
   ${HDF5_LIBRARIES}
   ${NETCDF_LIBS}
-  ${OpenCV_LIBS}
 )
 
 

@@ -20,7 +20,6 @@ using namespace std;
 #include "FeatureTrackUtil.h"
 #include "FeatureTrack.h"
 
-extern double bounds[6];
 
 bool TrackObjects(string const basename,int const step,int curtime,Frame& f1,Frame& f2, vector<string>& time_polyfile,vector<vector<TrackObject> > & objs) 
 { // objs are actually not used after assignment. It might be used in the future.
@@ -30,11 +29,6 @@ bool TrackObjects(string const basename,int const step,int curtime,Frame& f1,Fra
   // tag1, tag2 is initialized in OverlapTest(). They are shared by TrackSplit_Merge(),TrackContinuous(),TrackNew_Dissipate()
   // They tag the elements have been handled in Frame1 and Frame2 respectively.
      double tolerance = 5.0;
-
-//     int test=0;
-//     if(curtime==5)
-//         test=1;
-
      OverlapTest(f1,f2,OverlapTable,ScoreBoard,tag1,tag2);
   // ScoreBoard must be initialized in OverlapTest(), not in ComputScore(), otherwise, it will be init twice!
      //#cout<<"TrackObject:after OverlapTest"<<endl;
@@ -48,9 +42,9 @@ bool TrackObjects(string const basename,int const step,int curtime,Frame& f1,Fra
    	       cout<<"\n";
      }*/
      
-     ComputeScore2(_FORWARD_,f1,f2,ScoreBoard,OverlapTable);
+     ComputeScore(_FORWARD_,f1,f2,ScoreBoard,OverlapTable);
      //#cout<<"TrackObject:after ComputeScore(_FORWARD_)\n";
-     ComputeScore2(_BACKWARD_,f1,f2,ScoreBoard,OverlapTable);
+     ComputeScore(_BACKWARD_,f1,f2,ScoreBoard,OverlapTable);
      //#cout<<"TrackObject:after ComputeScoreBoard(_BACKWARD_)\n";
      //#cout<<"ScoreBoard:\n";
      /*//#for(vector<vector<int> >::const_iterator it1=ScoreBoard.begin();it1!=ScoreBoard.end();++it1)
@@ -106,13 +100,9 @@ bool TrackObjects(string const basename,int const step,int curtime,Frame& f1,Fra
   // or more objects in t(i+1). Similarly, entries of maximum equal scores ina column, indicates that objects in t(i) merges
   //into an object in t(i+1). The entries with maximum score which are not chosen in the above steps are continuous. 
   // The remaining objects in the search space are tagged creation (for t(i+1)), and dissipation (for t(i)).
-
-  // Modified by Weiping Hua
-//     TrackSplit_Merge(step,_SPLIT_,f1,f2,outfile,objs,tag1,tag2,ScoreBoard,tolerance);
-     TrackSplit_Merge2(step,_SPLIT_,f1,f2,outfile,objs,tag1,tag2,ScoreBoard,tolerance);
+     TrackSplit_Merge(step,_SPLIT_,f1,f2,outfile,objs,tag1,tag2,ScoreBoard,tolerance);
      //#cout<<"TrackObject:after TrackSplit\n";
-//     TrackSplit_Merge2(step,_MERGE_,f1,f2,outfile,objs,tag1,tag2,ScoreBoard,tolerance);
-     TrackSplit_Merge2(step,_MERGE_,f1,f2,outfile,objs,tag1,tag2,ScoreBoard,tolerance);
+     TrackSplit_Merge(step,_MERGE_,f1,f2,outfile,objs,tag1,tag2,ScoreBoard,tolerance);
      //#cout<<"TrackObject:after TrackMerge\n";
      TrackContinuous(step,f1,f2,outfile,objs,tag1,tag2,ScoreBoard,tolerance);
      //#cout<<"TrackObject:after TrackContinuous\n";
@@ -147,10 +137,10 @@ void OverlapTest(Frame& t1,Frame& t2,vector<vector<int> > &OverlapTable,vector<v
      // the total volume of each frame. (volume is actually nodes number) 
      int numNodes1=t1.nodes.size();
      int numNodes2=t2.nodes.size();
-     double shift_thresh = std::pow((t1.xMax-t1.xMin)*0.001,2)+std::pow((t1.yMax-t1.yMin)*0.001,2); //use 9 for best result so far..
+     int shift_thresh = 9; //use 9 for best result so far..
  //    int temp_shift_thresh = 0;
      // the while loop is extemely time consuming. I use [] intead of at() when accessing vectors.
-     int i(0), j(0);
+     register int i(0), j(0);
      //#cout<<"OverlapTest:numNodes1="<<numNodes1<<" numNodes2="<<numNodes2<<endl;
      while (i<numNodes1 || j<numNodes2)
      {
@@ -169,29 +159,14 @@ void OverlapTest(Frame& t1,Frame& t2,vector<vector<int> > &OverlapTable,vector<v
 
 
           //(t1.nodes[i].NodeID == t2.nodes[j].NodeID)   /* overlap */    //     (t1.nodes[i].NodeID == t2.nodes[j].NodeID)
-
-
-         //          int tempval =  (t2.nodes[j].NodeID) - (t1.nodes[i].NodeID);
-         // Edit by Weiping Hua
-         // It's insane to use NodeID. Now we use the coordinates.
-          double tempval =  std::pow(t2.nodes[j].xCoord-t1.nodes[i].xCoord,2)+std::pow(t2.nodes[j].yCoord-t1.nodes[i].yCoord,2)+std::pow(t2.nodes[j].zCoord-t1.nodes[i].zCoord,2);
-
-
-          //          if ( tempval <= shift_thresh)
+          int tempval =  (t2.nodes[j].NodeID) - (t1.nodes[i].NodeID);
+//          if ( tempval <= shift_thresh) 
 //          if ( (tempval <= shift_thresh) && ( tempval >= 0) ) //(t1.nodes[i].NodeID == t2.nodes[j].NodeID) 
 //          if (t1.nodes[i].NodeID == t2.nodes[j].NodeID)  //(t1.nodes[i].NodeID == t2.nodes[j].NodeID) 
 	  //if ( (tempval <= shift_thresh) && ( tempval >= 0) ) //(t1.nodes[i].NodeID == t2.nodes[j].NodeID)
           //if (t1.nodes[i].NodeID == t2.nodes[j].NodeID)
          if ( (tempval <= shift_thresh) && ( tempval >= 0) )
           {
-//             ucdNode test1;
-//             ucdNode test2;
-//             int test=0;
-//             if(t1.nodes[i].ObjID ==27 && t2.nodes[j].ObjID==31){
-//                 test=1;
-//                 test1 = t1.nodes[i];
-//                 test2 = t2.nodes[j];
-//             }
                OverlapTable[t1.nodes[i++].ObjID][t2.nodes[j++].ObjID]++;
                  //cout<<"An entry entered to the OVERLAPTABLE !!"<< endl;
           }
@@ -211,7 +186,6 @@ void OverlapTest(Frame& t1,Frame& t2,vector<vector<int> > &OverlapTable,vector<v
 	       i = numNodes1;
 	       j = numNodes2;
           }
-
      }
 
 }
@@ -254,12 +228,8 @@ obj1  2  504    56      7
           int NumOvlp(Overlaps.size()); 
           int NumCom( (int) pow(2.0, NumOvlp) );
           Comb.resize(NumOvlp);
-          for (register int i=1; i<NumCom; i++)
+          for (register int i=1; i<NumCom; i++) 
           {
-              // By Weiping Hua
-              // This combination is to calculate all possible combination (00/01/10/11) and pick up the biggest score. I guess it is because the previous
-              // method would regard this as a merge/split by checking if the minimum difference is lower than the tolerence. However, in most cases, every
-              // feature needs to pass the tolerence instead of finding the highest score.
                GenCombination(Comb, i); 
                float cost(  (float) Intersect(Comb, NumOvlp, Overlaps, obj1, direct,OverlapTable)/GeomMean(Comb, NumOvlp, Overlaps, obj1, direct,t1,t2) );
                int Score((int)(1000*cost));
@@ -284,65 +254,6 @@ obj1  2  504    56      7
      }
      return 1;
 }
-
-int ComputeScore2(DIRECTION const direct,Frame& t1,Frame& t2,vector<vector<int> >& ScoreBoard,vector<vector<int> >& OverlapTable)
-{
-  vector<int> Comb; // no_ext+rand_wr, init in GenCombination()
-  vector<int> Overlaps; //no_ext+rand_wr, init in FindOverlap()
-
-
-/* Modified by Weiping Hua*/
-
-/* Overlaps looks like:
-    3 5 6 8
-   It is constructed with push_back(). Each element is the index of obj it is overlapping.
-   */
-/* OverlapTable looks like:
-          obj2
-         0      1       2
-      ___________________
-      0  20   1000    204
-      1  36    485     56
-obj1  2  504    56      7
-      3  23     3      13
-      __________________
-   Each element in this 2d array is the overlap volume (node number) of two objs.
-   OverlapTable is not symmetric.
-   */
-/* ScoreBoard looks like OverlapTable. Each element in this 2d array is the score of two objs.
-   It is not symmetric. OverlapTable[i][j]!=0 <=> ScoreBoard[i][j]. ScoreBoard is actually an overlapTable after
-   processing. An element in OverlapTable is the raw overlapping volume between two objects in different frames.
-   ScoreBoard's elements are obtained after overall considerated. A big element in OverlapTable does not mean
-   there is a corresponding big element in the ScoreBoard.
-   */
-
-    int numObjs1=t1.objVols.size();
-    int numObjs2=t2.objVols.size();
-    int numObjs=(direct==_FORWARD_) ? numObjs1:numObjs2;
-    for (int obj1 = 0; obj1<numObjs; obj1++){
-        Overlaps.clear();
-        FindOverlap(obj1, Overlaps, direct,t1,t2,OverlapTable); // store the overlapping object indexes into Overlaps vector
-        int NumOvlp(Overlaps.size());
-        int NumCom( (int) pow(2.0, NumOvlp) );
-        Comb.resize(NumOvlp);
-        for (int i=0; i<NumOvlp; i++){
-            //               GenCombination(Comb, i);
-            float cost(Intersect2(i, Overlaps, obj1, direct,OverlapTable)/GeomMean3(i, Overlaps, obj1, direct,t1,t2) );
-            int Score((int)(1000*cost));
-            int obj2 = Overlaps.at(i);
-            if(direct==_FORWARD_){
-               if((Score>ScoreBoard.at(obj1).at(obj2)) && (cost>Consts::DEFAULT_TOLERANCE))
-                   ScoreBoard.at(obj1).at(obj2) = Score;
-            }
-            else{
-                if((Score>ScoreBoard.at(obj2).at(obj1)) && (cost>Consts::DEFAULT_TOLERANCE))
-                    ScoreBoard.at(obj2).at(obj1) = Score;
-            }
-        }
-    }
-    return 1;
-}
-
 
 /*! \fn void FindOverlap(int const obj,vector<int>& Overlaps, DIRECTION const direct,Frame& t1,Frame& t2,vector<vector<int> > &OverlapTable )
   \brief With OverlapTable, find the overlaps for an object.
@@ -399,7 +310,7 @@ void GenCombination(vector<int>& comb,int i)
 int Intersect(vector<int> const & Comb,int const NumOvlp,vector<int> const & Overlaps,int const obj, DIRECTION const direct,vector<vector<int> > &OverlapTable)
 {
      int InterVol(0);
-     for (int i=0; i<NumOvlp; i++)
+     for (register int i=0; i<NumOvlp; i++)
      {
           if (Comb.at(i))
           {
@@ -410,17 +321,6 @@ int Intersect(vector<int> const & Comb,int const NumOvlp,vector<int> const & Ove
                     InterVol += OverlapTable.at(obj1).at(obj);
 	  }
     }
-    return InterVol;
-}
-// Modified by Weiping Hua
-float Intersect2(int objectIndex,vector<int> const & Overlaps,int const obj, DIRECTION const direct,vector<vector<int> > &OverlapTable)
-{
-    float InterVol(0);
-    int obj1 = Overlaps.at(objectIndex);
-    if(direct==_FORWARD_)
-        InterVol += OverlapTable.at(obj).at(obj1);
-    else
-        InterVol += OverlapTable.at(obj1).at(obj);
     return InterVol;
 }
 //  
@@ -442,7 +342,7 @@ float GeomMean(vector<int> const & Comb,int const NumOvlp,vector<int> const & Ov
      {
           if (Comb.at(i))
           {
-           int obj1 = Overlaps.at(i);
+	       int obj1 = Overlaps.at(i);
 	       if(direct==_FORWARD_)
 	            vol += t2.objVols.at(obj1).ObjVol;    
 	       else
@@ -456,59 +356,6 @@ float GeomMean(vector<int> const & Comb,int const NumOvlp,vector<int> const & Ov
          mean = static_cast<float>(sqrt(double(t2.objVols.at(obj).ObjVol*vol)));
     return mean;
 }
-float GeomMean2(int objectIndex,vector<int> const & Overlaps,int const obj, DIRECTION const direct, Frame& t1, Frame& t2)
-{
-    long vol(0);
-
-    int obj1 = Overlaps.at(objectIndex);
-    if(direct==_FORWARD_)
-        vol += t2.objVols.at(obj1).objSurfVol;
-    else
-        vol += t1.objVols.at(obj1).objSurfVol;
-    float mean;
-    if(direct==_FORWARD_)
-         mean = static_cast<float>(sqrt(double(t1.objVols.at(obj).objSurfVol*vol)));
-    else
-         mean = static_cast<float>(sqrt(double(t2.objVols.at(obj).objSurfVol*vol)));
-    return mean;
-}
-
-float GeomMean3(int objectIndex,vector<int> const & Overlaps,int const obj, DIRECTION const direct, Frame& t1, Frame& t2)
-{
-    long vol(0);
-
-    int obj1 = Overlaps.at(objectIndex);
-    if(direct==_FORWARD_)
-        vol += t2.objVols.at(obj1).ObjVol;
-    else
-        vol += t1.objVols.at(obj1).ObjVol;
-    float mean;
-    if(direct==_FORWARD_)
-         mean = static_cast<float>(sqrt(double(t1.objVols.at(obj).ObjVol*vol)));
-    else
-         mean = static_cast<float>(sqrt(double(t2.objVols.at(obj).ObjVol*vol)));
-    return mean;
-}
-
-
-float Union(int objectIndex,vector<int> const & Overlaps,int const obj, DIRECTION const direct, Frame& t1, Frame& t2)
-{
-    long vol(0);
-
-    int obj1 = Overlaps.at(objectIndex);
-    if(direct==_FORWARD_)
-        vol += t2.objVols.at(obj1).objSurfVol;
-    else
-        vol += t1.objVols.at(obj1).objSurfVol;
-    float mean;
-    if(direct==_FORWARD_)
-         mean = static_cast<float>(sqrt(double(t1.objVols.at(obj).objSurfVol*vol)));
-    else
-         mean = static_cast<float>(sqrt(double(t2.objVols.at(obj).objSurfVol*vol)));
-    return mean;
-}
-
-
 
 
 /*! bool RewritePolyFiles(string const trakTable, int const step,vector<string>& time_polyfile)
@@ -546,8 +393,7 @@ bool ReadDagFile(string const Filename,int const step, vector<FRAME>& FrameList)
      string buffer;
      bool tmpfr0isNull(true);
      int numFrames(0);
-     TMPFR tmpfr0;
-     TMPFR tmpfr1;
+     TMPFR tmpfr0, tmpfr1;
      while(1)
      {
          getline(fp, buffer,'\n');
@@ -1074,152 +920,6 @@ void TrackSplit_Merge(int const step, SPLIT_MERGE const sm,Frame& t1,Frame &t2, 
           cout<<nSplits<<" merges\n";
 }
 
-// Modified by Weiping
-// Changes: THe difference between every feature in the second frame with the previous feature should be lower than the tolerence
-void TrackSplit_Merge2(int const step, SPLIT_MERGE const sm,Frame& t1,Frame &t2, FILE* outfile,vector<vector<TrackObject> >&  objs,vector<int>& tag1,vector<int>& tag2,vector<vector<int> >& ScoreBoard, double tolerance)
-{
-     int numObjs, nSplits(0), objVolume; // nSplits counts the times of splits/merges, for debug purpose.
-     if(sm==_SPLIT_)
-          numObjs=t1.objVols.size();
-     else
-          numObjs=t2.objVols.size();
-     string funcname;
-     if(sm==_SPLIT_)
-          funcname="TrackSplit_Merge(SPLIT)";
-     else
-          funcname="TrackSplit_Merge(MERGE)";
-
-
-     /*
-     // section added by Naveen to find max and min values in
-     // scoreboard-------------------------------------
-     // finding the maximum and minimum values in the scoreboard and calculate tolerance which is some %
-     // of difference between max and min
-     // this tolerance is passed as an argument to GetSameScore function . the objects are considered to
-     // be split or merged if objects in same row or column
-     // are equal for lie between this tolerance level.
-
-     // Modified by Weiping Hua
-     // Min/Max are fixed to [0, 1000] in Score Computing
-     // I doubt why we need the Get SameScore here
-     // Thus I simplify the code to check if the Score is bigger than the score.
-     */
-
-     int max = __DBL_MIN__;
-     int min = __DBL_MAX__;
-
-//     for(int i = 0; i< ScoreBoard.size() ; i++)
-//     {
-//       for(int j = 0; j<ScoreBoard[i].size(); j++)
-//       {
-//         if(ScoreBoard[i][j] > max)
-//            max = ScoreBoard[i][j];
-//         if(ScoreBoard[i][j] < min)
-//       min = ScoreBoard[i][j];
-//       }
-//     }
-
-     //Defined by the ScoreBoard
-     max=1000;
-     min=0;
-     tolerance = (max - min)*0.75;  // tolerance is 15% of difference between max and min values in
-     //tolerance= 0;                               // scoreboard
-
-     // cout<<"\n debug Max , Min and tolerance values are "<<max<<"\t"<<min<<"\t"<<tolerance<<endl;
-     // end of section added by Naveen
-     // ------------------------------------------------------------------
-
-
-     for (int obj=0; obj<numObjs; obj++)
-     {
-          vector<int> list; //ext+seq_wr+no_init
-          vector<int> SMList; //ext+seq_wr+no_init
-          if(sm==_MERGE_ && tag2.at(obj))
-               continue;
-          if(sm==_SPLIT_){
-               NumNonZeros(obj, list, _ROW_,t1,t2,ScoreBoard,tag1,tag2);
-               objVolume=t1.objVols.at(obj).ObjVol;
-          }
-          else {
-               NumNonZeros(obj, list, _COL_,t1,t2,ScoreBoard,tag1,tag2);
-               objVolume=t2.objVols.at(obj).ObjVol;
-          }
-          int nzero = list.size(); // nzero is actually the number of objects in the other frame overlapping with this object.
-          //#cout<<funcname<<":obj"<<obj<<" has "<<nzero<<" overlapping objs in the other frame\n";
-          if (nzero>1)
-          {
-//               for (int i=0; i<nzero; i++)
-//               {
-                vector<int>::iterator mytag1;
-                vector<int>::iterator mytag2;
-                mytag1= (sm==_SPLIT_) ? tag1.begin():tag2.begin();
-                mytag2= (sm==_SPLIT_) ? tag2.begin():tag1.begin();
-//                if (*(mytag2+list.at(i))==0)
-//                    {
-//                     vector<int> SMList; //ext+seq_wr+no_init
-                     int nSM;
-                     if(sm==_SPLIT_)
-//	                      nSM=GetSameScore(obj, i, nzero, list, SMList,_ROW_,ScoreBoard,tag1,tag2, tolerance);
-                          nSM=CheckSM_Condition(obj, nzero, list, SMList,_ROW_,ScoreBoard,tag1,tag2, tolerance,objVolume);
-                     else
-//	                      nSM=GetSameScore(obj, i, nzero, list, SMList,_COL_,ScoreBoard,tag1,tag2, tolerance);
-                          nSM=CheckSM_Condition(obj, nzero, list, SMList,_COL_,ScoreBoard,tag1,tag2, tolerance,objVolume);
-
-                     if (nSM>1)
-                         { // means there is split/merge
-
-                         //# cout<<funcname<<":obj "<<obj<<" has split/merge with "<<nSM<<" objs in the other frames\n";
-                              *(mytag1+obj) = 1;    /* tag the object in the list1 */
-                          ++nSplits;
-                          if(sm==_SPLIT_)
-                              {
-                                objs_bcheck(step-1,obj,objs);
-                                objs.at(step-1).at(obj).issplit = Consts::YES;
-                                fprintf(outfile,"%d\t-1\t", obj+1);
-                          }
-                          else
-                              {
-                               objs_bcheck(step,obj,objs);
-                               objs.at(step).at(obj).ismerge=Consts::YES;
-                          }
-                          for(int j=0; j<nSM; j++)
-                              {
-                               int obj2(SMList.at(j));
-                               *(mytag2+obj2)=1;
-                               fprintf(outfile,"%d\t", obj2+1);
-                               if(sm==_SPLIT_)
-                                   {
-                                    objs_bcheck(step-1,obj,objs);
-                                objs.at(step-1).at(obj).children.push_back(obj2);
-                                objs_bcheck(step,obj2,objs);
-                                objs.at(step).at(obj2).parents.push_back(obj);
-                               }
-                                   else
-                                   {
-                                objs_bcheck(step-1,obj2,objs);
-                                objs.at(step-1).at(obj2).children.push_back(obj);
-                                objs_bcheck(step,obj,objs);
-                                objs.at(step).at(obj).parents.push_back(obj2);
-                               }
-                          }
-                              if(sm==_SPLIT_)
-                                  fprintf(outfile,"\n");
-                          else
-                                   fprintf(outfile,"-1\t%d\n",obj+1);
-
-                          //# cout<<funcname<<":after handling obj"<<obj<<" who has split/merge\n";
-                        }
-//                }
-//               }
-          }
-     }
-    //# cout<<"TrackSplit_Merge:";
-     if(sm==_SPLIT_)
-          cout<<nSplits<<" splits\n";
-     else
-          cout<<nSplits<<" merges\n";
-}
-
 /*! \fn void TrackContinuous(int step,Frame& t1,Frame &t2,FILE* outfile,vector<vector<Obj> >&  objs,vector<int>& tag1,vector<int>& tag2,vector<vector<int> >& ScoreBoard)
   \brief track continun events
  */
@@ -1233,7 +933,7 @@ void TrackContinuous(int step,Frame& t1,Frame &t2,FILE* outfile,vector<vector<Tr
      {
           for (obj2=0; obj2<numObjs2; obj2++)
           {
-           if (ScoreBoard.at(obj1).at(obj2)>250 && (!tag1.at(obj1)) && (!tag2.at(obj2)))
+	       if (ScoreBoard.at(obj1).at(obj2) && (!tag1.at(obj1)) && (!tag2.at(obj2)))
                {
 	            if (IsMax(obj1, obj2,_ROW_,ScoreBoard,tag1,tag2,t1,t2, tolerance) && IsMax(obj1, obj2,_COL_,ScoreBoard,tag1,tag2,t1,t2, tolerance))
                     {
@@ -1265,7 +965,7 @@ void TrackNew_Dissipate(int const step, NEW_DISSIPATE const nd,Frame& t1,Frame &
           numObjs=t2.objVols.size();
      else
           numObjs=t1.objVols.size();
-     for (int obj=0; obj<numObjs; obj++)
+     for (register int obj=0; obj<numObjs; obj++)
      {
           vector<int>::iterator mytag;
           if(nd==_NEW_)
@@ -1346,28 +1046,6 @@ int GetSameScore(int const row,int const ind,int const nlist,vector<int> & list,
      }
      return split.size();
 }
-
-// Modified by Weiping Hua
-// Change the Split/Merge check
-int CheckSM_Condition(int const row,int const nlist,vector<int> & list,vector<int> & split, ROW_COL const rc,vector<vector<int> >& ScoreBoard,vector<int>& tag1,vector<int>& tag2, double &tolerance, int objVolume)
-{
-    for (int i=0; i<nlist; i++)
-    {
-        if(rc==_ROW_)
-        {
-//            int test = ScoreBoard.at(row).at(list.at(ind));
-           if (ScoreBoard.at(row).at(list.at(i)) > (int)tolerance && (tag2.at(list.at(i))==0))
-                split.push_back(list.at(i));
-        }
-        else
-        {
-           if(ScoreBoard.at(list.at(i)).at(row) > (int)tolerance && (tag1.at(list.at(i))==0))
-                split.push_back(list.at(i));
-        }
-    }
-    return split.size();
-}
-
 
 /*! \fn bool IsMax(int const row,int const col, ROW_COL const rc,vector<vector<int> >& ScoreBoard,vector<int>& tag1,vector<int>& tag2,Frame& t1, Frame& t2)
   \brief see whether element <row,col> in scoreboard is the max in the row (with rc=_ROW_) or in the col (with rc=_COL_)
