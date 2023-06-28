@@ -3,10 +3,9 @@ Vizlab Feature Tracking program
 
 This program is used to detect the eddy in the oceangeography dataset. Our paper is accepted by EnvirVis 2023. If you use our code, please refer to our paper:  
 
+See our [Hybrid eddy detection](https://github.com/VizlabRutgers/Hybrid-Eddy-detection) project for the eddy detection usage.
 
->Hua, Weiping, et al. "A Hybrid 3D Eddy Detection Technique Based on Sea Surface Height and Velocity Field." arXiv preprint arXiv:2305.08229 (2023).
-
-We've used it in SciViz Contest 2020 with Red Sea data https://kaust-vislab.github.io/SciVis2020/.
+>Silver, Deborah, and Xin Wang. "Tracking scalar features in unstructured data sets." In Visualization'98. Proceedings, pp. 79-86. IEEE, 1998
 
 Please contact Rutgers Vizlab if you has any problem
 https://vizlab.rutgers.edu/
