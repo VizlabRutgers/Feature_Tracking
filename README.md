@@ -1,7 +1,7 @@
 # Feature_Tracking
 Vizlab Feature Tracking program
 
-This program is generally used to detect features. See our [Hybrid eddy detection](https://github.com/VizlabRutgers/Hybrid-Eddy-detection) project for the eddy detection usage.
+This program is generally used to detect features. See our [Hybrid eddy detection](https://github.com/VizlabRutgers/Hybrid-Eddy-detection) project for the eddy detection usage in oceanography dataset.
 
 If you use our code, please refer to our paper:  
 
